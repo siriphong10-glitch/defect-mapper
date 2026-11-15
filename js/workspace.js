@@ -115,7 +115,8 @@ function renderShell() {
       <div class="floor-tabs" id="ftabs"></div>
     </div>
     <div class="ws-main">
-      <aside class="ws-left">
+      <aside class="ws-left ${localStorage.getItem('dm_left_collapsed') === '1' ? 'collapsed' : ''}" id="left">
+        <button class="ltoggle" id="lToggle" title="ซ่อน/แสดงรายการความเสียหาย ( [ )"></button>
         <div class="lhead"><h4><span>รายการในชั้นนี้</span><span class="muted" id="lcount"></span></h4>
           <input class="inp" id="lfilter" type="text" placeholder="ค้นหาเลข / หัวข้อ"></div>
         <div class="dlist" id="dlist"></div>
@@ -164,11 +165,18 @@ function renderShell() {
     { label: '⤓ ส่งออกแพ็กข้อมูล / สำรอง (.zip)', fn: async () => { const { exportPack } = await import('./export.js'); exportPack(P().id); } },
   ]);
   $('#lfilter').oninput = (e) => { S.filter = e.target.value; renderList(); };
+  $('#lToggle').onclick = toggleLeft;
   renderTitle();
   renderTools();
   setupCanvas();
   document.removeEventListener('keydown', onKey);
   document.addEventListener('keydown', onKey);
+}
+
+function toggleLeft() {
+  const l = $('#left');
+  const c = l.classList.toggle('collapsed');
+  try { localStorage.setItem('dm_left_collapsed', c ? '1' : '0'); } catch { /* */ }
 }
 
 function renderTitle() {
@@ -757,7 +765,7 @@ function onKey(e) {
     select(null); return;
   }
   if (typing) return;
-  if (!canEdit() && !['f', 'l', '+', '=', '-', ' '].includes(e.key.toLowerCase())) return;
+  if (!canEdit() && !['f', 'l', '+', '=', '-', ' ', '['].includes(e.key.toLowerCase())) return;
   if (e.key === ' ') { spaceDown = true; e.preventDefault(); window.addEventListener('keyup', (ev) => { if (ev.key === ' ') spaceDown = false; }, { once: true }); return; }
   if (S.draft?.kind === 'area') {
     if (e.key === 'Enter') { finishArea(); return; }
@@ -772,6 +780,7 @@ function onKey(e) {
   else if (k === 's') setTool('scale');
   else if (k === 'c') { S.copyPrev = !S.copyPrev; renderTools(); }
   else if (k === 'l') { S.showLabels = !S.showLabels; renderTools(); renderPins(); }
+  else if (k === '[') toggleLeft();
   else if (k === 'f') fitView();
   else if (k === '+' || k === '=') zoomAt(1.25);
   else if (k === '-') zoomAt(0.8);

@@ -139,7 +139,14 @@ input.inp, select.inp, textarea.inp {
 .ftab .more { width: 22px; height: 22px; border-radius: 6px; display: grid; place-items: center; opacity: .6; }
 .ftab .more:hover { opacity: 1; background: rgba(0,0,0,.1); }
 .ws-main { display: flex; min-height: 0; position: relative; }
-.ws-left { flex: 0 0 20%; max-width: 20%; min-width: 0; background: #fff; border-right: 1px solid var(--line); display: flex; flex-direction: column; }
+.ws-left { flex: 0 0 20%; max-width: 20%; min-width: 0; background: #fff; border-right: 1px solid var(--line); display: flex; flex-direction: column; position: relative; z-index: 6; transition: flex-basis .2s, max-width .2s; }
+.ws-left.collapsed { flex-basis: 0; max-width: 0; border-right: 0; }
+.ws-left.collapsed > :not(.ltoggle) { display: none; }
+.ltoggle { position: absolute; top: 50%; right: -22px; transform: translateY(-50%); width: 22px; height: 56px; border: 1px solid var(--line); border-left: 0; border-radius: 0 9px 9px 0; background: #fff; cursor: pointer; color: var(--ink-2); box-shadow: 2px 1px 6px rgba(16,24,40,.08); display: grid; place-items: center; padding: 0; }
+.ltoggle::before { content: '◀'; font-size: 11px; }
+.ws-left.collapsed .ltoggle::before { content: '▶'; }
+.ws-left.collapsed .ltoggle { right: -26px; width: 26px; color: #fff; background: var(--navy); border-color: var(--navy); }
+.ltoggle:hover { color: var(--navy); background: var(--head-2); }
 .ws-left .lhead { padding: 10px 12px 8px; border-bottom: 1px solid var(--line-2); }
 .ws-left .lhead h4 { font-size: 14px; display: flex; justify-content: space-between; align-items: baseline; gap: 6px; }
 .ws-left .lhead input { margin-top: 8px; padding: 5px 9px; font-size: 13.5px; }
