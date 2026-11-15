@@ -75,7 +75,7 @@ async function renderHome() {
         e.stopPropagation();
         dropdown(e.currentTarget, [
           { label: '✎ แก้ไขข้อมูลโครงการ', fn: () => projectDialog(p) },
-          { label: '⤓ ส่งออกแพ็กข้อมูล (.zip)', fn: async () => { const { exportPack } = await import('./export.js'); exportPack(p.id); } },
+          { label: '⤓ ส่งออก (Word / PDF / Excel / รูป / แพ็กข้อมูล)…', fn: async () => { const { exportDialog } = await import('./export.js'); exportDialog(p.id); } },
           '-',
           { label: '🗑 ลบโครงการ', danger: true, fn: async () => {
             if (await confirmBox(`ลบโครงการ “${p.name}” พร้อมแปลนและรูปทั้งหมด? การลบไม่สามารถย้อนกลับได้`, { ok: 'ลบโครงการ', danger: true })) {
@@ -97,7 +97,7 @@ export function dropdown(anchor, items) {
   const dd = h('<div class="dropdown"></div>');
   for (const it of items) {
     if (it === '-') { dd.appendChild(h('<hr>')); continue; }
-    const b = h(`<button class="${it.danger ? 'danger' : ''}">${esc(it.label)}</button>`);
+    const b = h(`<button class="${it.danger ? 'danger' : ''}">${it.html || esc(it.label)}</button>`);
     b.onclick = () => { dd.remove(); it.fn(); };
     dd.appendChild(b);
   }

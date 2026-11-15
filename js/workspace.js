@@ -63,7 +63,7 @@ function renderShell() {
       <div class="title"><h2 id="pname"></h2><div class="sub" id="psub"></div></div>
       <button class="btn" id="btnTpl" title="แก้ไขหัวข้อและตัวเลือกความเสียหาย">⚙ หัวข้อความเสียหาย</button>
       <button class="icon-btn" id="btnMore" title="เพิ่มเติม">⋯</button>
-      <button class="btn primary" id="btnExport">⤓ ส่งออก</button>
+      <span class="exp-split"><button class="btn primary" id="btnExport" title="ส่งออกรายงาน">⤓ ส่งออก</button><button class="btn primary" id="btnExportMenu" title="เลือกรูปแบบไฟล์">▾</button></span>
     </div>
     <div class="ws-floors">
       <button class="btn sm" id="btnImport" title="นำเข้ารูปแปลน (JPG/PNG) หรือ PDF ได้หลายไฟล์ในครั้งเดียว">＋ นำเข้าแปลนชั้น</button>
@@ -91,9 +91,19 @@ function renderShell() {
       refreshAll();
     });
   };
-  $('#btnExport').onclick = async () => {
+  const openExport = async (fmt) => {
     const { exportDialog } = await import('./export.js');
-    exportDialog(S.project.id);
+    if (!fmt) fmt = (await db.getMeta('exportPrefs', {})).lastFormat || 'word';
+    exportDialog(S.project.id, fmt);
+  };
+  $('#btnExport').onclick = () => openExport();
+  $('#btnExportMenu').onclick = async (e) => {
+    const anchor = e.currentTarget;
+    const { EXPORT_FORMATS } = await import('./export.js');
+    dropdown(anchor, EXPORT_FORMATS.map(f => ({
+      html: `<span class="fmt-ic" style="background:${f.color}">${f.icon}</span><span class="fmt-txt">${esc(f.label)}<small>${esc(f.desc)}</small></span>`,
+      fn: () => openExport(f.id),
+    })));
   };
   $('#btnMore').onclick = (e) => dropdown(e.currentTarget, [
     { label: '✎ แก้ไขข้อมูลโครงการ', fn: () => projectDialog(P(), () => { renderTitle(); refreshAll(); }) },
@@ -726,7 +736,6 @@ async function createDefect(shape, pts) {
   await touch(p);
   S.selectedId = d.id;
   renderTabs(); renderList(); renderPins(); renderRight(); updateHint();
-  if (p.numbering === 'manual') setTimeout(() => { const n = $('#fNo'); if (n) { n.focus(); n.select(); } }, 60);
 }
 
 function select(id) {

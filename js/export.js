@@ -10,14 +10,14 @@ const SHAPE_TH = { point: 'จุด', area: 'พื้นที่', rect: 'พ
 // =====================================================================================
 // Report model — shared by every export format
 // =====================================================================================
-export async function buildModel(projectId, floorIds = null) {
+export async function buildModel(projectId, floorIds = null, filter = null) {
   const { project, floors, defects } = await loadBundle(projectId);
   const fl = floorIds ? floors.filter(f => floorIds.includes(f.id)) : floors;
   const fo = new Map(fl.map((f, i) => [f.id, i]));
   const ds = defects.filter(d => fo.has(d.floorId))
     .sort((a, b) => naturalCmp(a.no, b.no) || fo.get(a.floorId) - fo.get(b.floorId));
 
-  const items = ds.map(d => {
+  let items = ds.map(d => {
     const tpl = project.templates[d.type] || project.templates.structural;
     const floor = fl[fo.get(d.floorId)];
     const sevF = fieldByRole(tpl, 'severity'), urgF = fieldByRole(tpl, 'urgency'), elF = fieldByRole(tpl, 'element'), sizeF = fieldByRole(tpl, 'size');
@@ -35,6 +35,12 @@ export async function buildModel(projectId, floorIds = null) {
       key: groupKey(project, d),
     };
   });
+
+  if (filter) {
+    if (filter.types?.length) items = items.filter(it => filter.types.includes(it.d.type));
+    if (filter.sevs?.length) items = items.filter(it => filter.sevs.includes(it.sevText || '__none'));
+    if (filter.sort === 'floor') items.sort((a, b) => fo.get(a.floor.id) - fo.get(b.floor.id) || naturalCmp(a.no, b.no));
+  }
 
   // groups (same heading → one entry)
   const gmap = new Map();
@@ -212,80 +218,135 @@ function legendOf(model) {
 // =====================================================================================
 // Export dialog
 // =====================================================================================
-export async function exportDialog(projectId) {
-  const { project, floors } = await loadBundle(projectId);
+export const EXPORT_FORMATS = [
+  { id: 'word', icon: 'W', color: '#2b579a', label: 'Word (.docx)', desc: 'แปลน + รายการตามหัวข้อ + ตาราง แก้ไขต่อได้' },
+  { id: 'pdf', icon: 'PDF', color: '#c62828', label: 'PDF', desc: 'เนื้อหาเหมือน Word พร้อมหน้าปก' },
+  { id: 'image', icon: '🖼', color: '#0f766e', label: 'รูปแปลน', desc: 'เฉพาะแบบแปลนที่ปักแล้ว (PNG/JPG)' },
+  { id: 'excel', icon: 'X', color: '#217346', label: 'Excel (.xlsx)', desc: 'รายการทุกจุด + สรุป' },
+  { id: 'pack', icon: '⧉', color: '#6d28d9', label: 'แพ็กข้อมูล (.zip)', desc: 'ส่งให้ Claude เขียนรายงาน / สำรอง / ย้ายเครื่อง' },
+];
+
+export async function exportDialog(projectId, initialFmt = 'word') {
+  const { project, floors, defects } = await loadBundle(projectId);
   const saved = await db.getMeta('exportPrefs', {});
   const org = await db.getMeta('orgName', DEFAULT_ORG);
   const pref = (k, dflt) => saved[k] ?? dflt;
+  const sel = (name, opts, cur) => `<select name="${name}" class="inp" style="width:auto;display:inline-block;padding:2px 8px">${opts.map(([v, t]) => `<option value="${v}" ${String(cur) === String(v) ? 'selected' : ''}>${t}</option>`).join('')}</select>`;
+  const ckb = (name, label, on, hint = '') => `<label class="ck"><input type="checkbox" name="${name}" ${on ? 'checked' : ''}><span>${label}${hint ? `<br><span class="hint">${hint}</span>` : ''}</span></label>`;
+
+  // severity levels used in this project (for filtering)
+  const sevs = new Map();
+  for (const t of Object.values(project.templates)) (fieldByRole(t, 'severity')?.options || []).forEach(o => sevs.set(o.label, o.color));
+  const usedTypes = [...new Set(defects.map(d => d.type))];
+
   const body = h(`<div>
-    <div class="exp-formats">
-      <label><input type="radio" name="fmt" value="word" checked><b>Word (.docx)</b><span>แปลน + รายการ + ตาราง</span></label>
-      <label><input type="radio" name="fmt" value="pdf"><b>PDF</b><span>เหมือน Word และมีหน้าปก</span></label>
-      <label><input type="radio" name="fmt" value="image"><b>รูปแปลน (.png)</b><span>เฉพาะแบบแปลนที่ปักแล้ว</span></label>
-      <label><input type="radio" name="fmt" value="excel"><b>Excel (.xlsx)</b><span>รายการทุกจุด + สรุป</span></label>
-      <label><input type="radio" name="fmt" value="pack"><b>แพ็กข้อมูล (.zip)</b><span>ส่งให้ Claude เขียนรายงาน / สำรอง / ย้ายเครื่อง</span></label>
+    <div class="sec-title" style="margin-top:0">1. เลือกรูปแบบไฟล์</div>
+    <div class="exp-formats">${EXPORT_FORMATS.map(f => `<label><input type="radio" name="fmt" value="${f.id}" ${f.id === initialFmt ? 'checked' : ''}>
+      <span class="fi" style="background:${f.color}">${f.icon}</span><b>${f.label}</b><span>${f.desc}</span></label>`).join('')}</div>
+
+    <div class="sec-title">2. ตัวเลือกการส่งออก</div>
+    <div class="exp-opts" data-for="word pdf">
+      ${ckb('cover', 'หน้าปก “รายการความเสียหาย-ข้อบกพร่องของโครงการ …”', false)}
+      ${ckb('summary', 'ตารางสรุปจำนวนตามหัวข้อความเสียหาย', pref('summary', true))}
+      ${ckb('plans', 'แปลนเรียงชั้น (พร้อมตำแหน่งที่ปัก)', pref('plans', true))}
+      <label class="ck"><input type="checkbox" name="groups" ${pref('groups', true) ? 'checked' : ''}><span>รายการความเสียหายแยกตามหัวข้อ (หัวข้อซ้ำแสดงครั้งเดียว) — รูปตัวอย่าง ${sel('groupPhotos', [[1, '1 รูป'], [2, '2 รูป']], pref('groupPhotos', 2))}</span></label>
+      ${ckb('table', 'ตารางตำแหน่งทุกจุด (เรียงเลขลำดับ พร้อมจำนวนรวมและสรุปรายชั้น)', pref('table', true))}
+      <label class="ck"><input type="checkbox" name="perPoint" ${pref('perPoint', false) ? 'checked' : ''}><span>แบบฟอร์มรายจุด (ทุกจุด จุดละ 1 ตาราง) — รูปต่อจุด ${sel('pointPhotos', [[1, '1 รูป'], [2, '2 รูป'], [4, '4 รูป']], pref('pointPhotos', 2))}</span></label>
+      ${ckb('showUnchecked', 'แสดงตัวเลือกที่ไม่ได้ติ๊ก (☐) ในแบบฟอร์ม เหมือนแบบฟอร์มกระดาษ', pref('showUnchecked', true))}
+      <label class="fld" style="margin-top:8px"><span>ชื่อหน่วยงานผู้จัดทำ (แสดงบนปกและหัวกระดาษ — เว้นว่างได้)</span><input type="text" name="org" value="${esc(org)}"></label>
     </div>
-    <div class="exp-opts" id="optDoc">
-      <div class="sec-title" style="margin-top:0">ส่วนที่ต้องการแสดง</div>
-      <label class="ck"><input type="checkbox" name="cover"><span>หน้าปก “รายการความเสียหาย-ข้อบกพร่องของโครงการ …”</span></label>
-      <label class="ck"><input type="checkbox" name="summary" ${pref('summary', true) ? 'checked' : ''}><span>ตารางสรุปจำนวนตามหัวข้อความเสียหาย</span></label>
-      <label class="ck"><input type="checkbox" name="plans" ${pref('plans', true) ? 'checked' : ''}><span>แปลนเรียงชั้น (พร้อมตำแหน่งที่ปัก)</span></label>
-      <label class="ck"><input type="checkbox" name="groups" ${pref('groups', true) ? 'checked' : ''}><span>รายการความเสียหายแยกตามหัวข้อ — หัวข้อซ้ำแสดงครั้งเดียว พร้อมรูปตัวอย่าง
-        <select name="groupPhotos" class="inp" style="width:auto;display:inline-block;padding:1px 6px;margin-left:4px"><option value="1" ${pref('groupPhotos', 2) == 1 ? 'selected' : ''}>1 รูป</option><option value="2" ${pref('groupPhotos', 2) == 2 ? 'selected' : ''}>2 รูป</option></select></span></label>
-      <label class="ck"><input type="checkbox" name="table" ${pref('table', true) ? 'checked' : ''}><span>ตารางตำแหน่งทุกจุด (เรียงเลขลำดับ พร้อมจำนวนรวม)</span></label>
-      <label class="ck"><input type="checkbox" name="perPoint" ${pref('perPoint', false) ? 'checked' : ''}><span>แบบฟอร์มรายจุด (ทุกจุด จุดละ 1 ตาราง)
-        <select name="pointPhotos" class="inp" style="width:auto;display:inline-block;padding:1px 6px;margin-left:4px">${[1, 2, 4].map(n => `<option value="${n}" ${pref('pointPhotos', 2) == n ? 'selected' : ''}>${n} รูป</option>`).join('')}</select></span></label>
-      <label class="ck"><input type="checkbox" name="showUnchecked" ${pref('showUnchecked', true) ? 'checked' : ''}><span>แสดงตัวเลือกที่ไม่ได้ติ๊ก (☐) ในแบบฟอร์ม</span></label>
-      <label class="fld" style="margin-top:8px"><span>ชื่อหน่วยงานผู้จัดทำ (แสดงบนปก/หัวกระดาษ)</span><input type="text" name="org" value="${esc(org)}"></label>
+    <div class="exp-opts" data-for="image">
+      <div class="row" style="flex-wrap:wrap">
+        <label class="fld"><span>ชนิดไฟล์</span>${sel('imgType', [['png', 'PNG (คมชัด ไฟล์ใหญ่)'], ['jpg', 'JPG (ไฟล์เล็ก)']], pref('imgType', 'png'))}</label>
+        <label class="fld"><span>ความละเอียด (ด้านยาว)</span>${sel('imgRes', [[2000, 'มาตรฐาน 2,000 px'], [4000, 'สูง 4,000 px'], [6000, 'สูงมาก 6,000 px']], pref('imgRes', 4000))}</label>
+      </div>
+      ${ckb('imgHeader', 'ใส่แถบชื่อโครงการ/ชั้น และสัญลักษณ์ระดับความเสียหายด้านบนรูป', pref('imgHeader', true))}
+      <p class="hint">ถ้าเลือกหลายชั้น จะได้ไฟล์ .zip ที่มีรูปแยกทีละชั้น</p>
     </div>
-    <div class="exp-opts" id="optImg" style="display:none">
-      <label class="ck"><input type="checkbox" name="imgHeader" checked><span>ใส่แถบชื่อโครงการ/ชั้น และสัญลักษณ์ระดับความเสียหายด้านบนรูป</span></label>
+    <div class="exp-opts" data-for="excel">
+      ${ckb('xlsSummary', 'เพิ่มชีต “สรุปตามหัวข้อ” และ “สรุปตามชั้น”', pref('xlsSummary', true))}
+      ${ckb('xlsCoords', 'เพิ่มคอลัมน์พิกัดตำแหน่งบนแปลน (X, Y เป็น % ของแปลน)', pref('xlsCoords', false))}
     </div>
-    <div id="optFloors">
-      <div class="sec-title">ชั้น / แปลนที่ส่งออก</div>
-      <div class="floor-picks">${floors.map(f => `<label class="chip on"><input type="checkbox" name="floor" value="${f.id}" checked>${esc(f.name)}</label>`).join('') || '<span class="muted">ยังไม่มีแปลน</span>'}</div>
-      <label class="fld" style="margin-top:10px;max-width:260px"><span>ขนาดหมุดบนแปลน</span>
-        <select name="marker" class="inp"><option value="0.75">เล็ก</option><option value="1" selected>ปานกลาง</option><option value="1.4">ใหญ่</option><option value="1.9">ใหญ่มาก</option></select></label>
+    <div class="exp-opts" data-for="pack">
+      ${ckb('packAnnotated', 'แปลนที่ปักตำแหน่งแล้ว (สำหรับใส่ในรายงาน)', pref('packAnnotated', true))}
+      ${ckb('packPhotos', 'รูปประกอบทุกจุด', pref('packPhotos', true))}
+      ${ckb('packOriginal', 'แปลนต้นฉบับ', pref('packOriginal', true), 'จำเป็นถ้าจะใช้ไฟล์นี้สำรองข้อมูลหรือนำเข้ากลับในเครื่องอื่น')}
+      <p class="hint">แพ็กข้อมูลรวมทุกชั้นและทุกจุดของโครงการเสมอ</p>
+    </div>
+
+    <div data-for="word pdf image excel">
+      <div class="sec-title">3. เลือกข้อมูลที่ส่งออก</div>
+      <div class="fld"><span>ชั้น / แปลน <a href="#" id="flAll" style="font-weight:400;margin-left:6px">เลือกทั้งหมด</a> <a href="#" id="flNone" style="font-weight:400;margin-left:4px">ไม่เลือก</a></span>
+        <div class="floor-picks">${floors.map(f => `<label class="chip on"><input type="checkbox" name="floor" value="${f.id}" checked>${esc(f.name)} <span class="muted">(${defects.filter(d => d.floorId === f.id).length})</span></label>`).join('') || '<span class="muted">ยังไม่มีแปลน</span>'}</div></div>
+      ${usedTypes.length > 1 ? `<div class="fld"><span>ประเภทการตรวจสอบ</span><div class="floor-picks">${usedTypes.map(t => `<label class="chip on"><input type="checkbox" name="ftype" value="${t}" checked>${TYPE_LABELS[t]}</label>`).join('')}</div></div>` : ''}
+      <div class="fld"><span>ระดับความเสียหาย</span><div class="floor-picks">${[...sevs.entries()].map(([l, c]) => `<label class="chip on"><input type="checkbox" name="fsev" value="${esc(l)}" checked><span class="dot" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${c}"></span>${esc(l)}</label>`).join('')}
+        <label class="chip on"><input type="checkbox" name="fsev" value="__none" checked>ยังไม่ระบุ</label></div></div>
+      <div class="row" style="flex-wrap:wrap">
+        <label class="fld" data-for="word pdf excel"><span>การเรียงลำดับรายการ</span>${sel('sort', [['no', 'ตามเลขลำดับ'], ['floor', 'ตามชั้น แล้วตามเลขลำดับ']], pref('sort', 'no'))}</label>
+        <label class="fld" data-for="word pdf image"><span>ขนาดหมุดบนแปลน</span>${sel('marker', [[0.6, 'เล็ก'], [1, 'ปานกลาง'], [1.4, 'ใหญ่'], [1.9, 'ใหญ่มาก']], pref('marker', 1))}</label>
+      </div>
+      <p class="hint" id="expCount"></p>
     </div>
     <div id="expProg" style="display:none"><p class="muted" id="expMsg" style="margin:10px 0 0"></p><div class="progress"><div id="expBar"></div></div></div>
   </div>`);
+
+  const current = () => ({
+    fmt: $('[name=fmt]:checked', body).value,
+    floorIds: $$('[name=floor]:checked', body).map(x => x.value),
+    types: $$('[name=ftype]:checked', body).map(x => x.value),
+    sevs: $$('[name=fsev]:checked', body).map(x => x.value),
+  });
+  const countMatching = () => {
+    const c = current();
+    const tplSev = (d) => { const t = project.templates[d.type]; const f = fieldByRole(t, 'severity'); const v = f ? d.data?.[f.key] : ''; return v && severityInfo(t, v) ? v : '__none'; };
+    const n = defects.filter(d => c.floorIds.includes(d.floorId) && (!usedTypes.length || usedTypes.length < 2 || c.types.includes(d.type)) && c.sevs.includes(tplSev(d))).length;
+    $('#expCount', body).textContent = `จะส่งออก ${n} จาก ${defects.length} จุด`;
+  };
   const sync = () => {
-    const fmt = $('[name=fmt]:checked', body).value;
-    $('#optDoc', body).style.display = ['word', 'pdf'].includes(fmt) ? '' : 'none';
-    $('#optImg', body).style.display = fmt === 'image' ? '' : 'none';
-    $('#optFloors', body).style.display = fmt === 'pack' ? 'none' : '';
+    const fmt = current().fmt;
+    $$('[data-for]', body).forEach(el => { el.style.display = el.dataset.for.split(' ').includes(fmt) ? '' : 'none'; });
     $('[name=cover]', body).checked = fmt === 'pdf' ? pref('coverPdf', true) : pref('coverWord', false);
+    $('.modal-foot .btn.primary', body.closest('.modal'))?.replaceChildren(document.createTextNode(`ส่งออก ${EXPORT_FORMATS.find(f => f.id === fmt).label}`));
+    countMatching();
   };
   $$('[name=fmt]', body).forEach(r => r.onchange = sync);
-  $$('.floor-picks .chip', body).forEach(c => $('input', c).onchange = (e) => c.classList.toggle('on', e.target.checked));
-  sync();
+  $$('.floor-picks .chip', body).forEach(c => $('input', c).onchange = (e) => { c.classList.toggle('on', e.target.checked); countMatching(); });
+  const setAll = (on) => (e) => { e.preventDefault(); $$('[name=floor]', body).forEach(i => { i.checked = on; i.closest('.chip').classList.toggle('on', on); }); countMatching(); };
+  if ($('#flAll', body)) { $('#flAll', body).onclick = setAll(true); $('#flNone', body).onclick = setAll(false); }
 
-  modal({
+  const m = modal({
     title: `ส่งออก — ${project.name}`, body, wide: true,
     actions: [
       { label: 'ยกเลิก', value: null },
       { label: 'ส่งออก', kind: 'primary', onClick: async (b) => {
-        const fmt = $('[name=fmt]:checked', b).value;
-        const ck = (n) => $(`[name=${n}]`, b).checked;
+        const c = current();
+        const fmt = c.fmt;
+        const ck = (n) => !!$(`[name=${n}]`, b)?.checked;
+        const val = (n) => $(`[name=${n}]`, b)?.value;
         const opts = {
           cover: ck('cover'), summary: ck('summary'), plans: ck('plans'), groups: ck('groups'), table: ck('table'), perPoint: ck('perPoint'),
-          showUnchecked: ck('showUnchecked'), groupPhotos: +$('[name=groupPhotos]', b).value, pointPhotos: +$('[name=pointPhotos]', b).value,
-          org: $('[name=org]', b).value.trim(), marker: +$('[name=marker]', b).value, imgHeader: ck('imgHeader'),
-          floorIds: $$('[name=floor]:checked', b).map(x => x.value),
+          showUnchecked: ck('showUnchecked'), groupPhotos: +val('groupPhotos'), pointPhotos: +val('pointPhotos'),
+          org: val('org').trim(), marker: +val('marker'), imgHeader: ck('imgHeader'), imgType: val('imgType'), imgRes: +val('imgRes'),
+          xlsSummary: ck('xlsSummary'), xlsCoords: ck('xlsCoords'),
+          packAnnotated: ck('packAnnotated'), packPhotos: ck('packPhotos'), packOriginal: ck('packOriginal'),
+          sort: val('sort'), floorIds: c.floorIds,
+          filter: { types: usedTypes.length > 1 ? c.types : [], sevs: c.sevs.length === sevs.size + 1 ? [] : c.sevs, sort: val('sort') },
         };
         if (fmt !== 'pack' && !opts.floorIds.length) { toast('เลือกอย่างน้อย 1 ชั้น', 'error'); return false; }
+        if (fmt !== 'pack' && !c.sevs.length) { toast('เลือกระดับความเสียหายอย่างน้อย 1 ระดับ', 'error'); return false; }
         if (['word', 'pdf'].includes(fmt) && !(opts.cover || opts.summary || opts.plans || opts.groups || opts.table || opts.perPoint)) { toast('เลือกอย่างน้อย 1 ส่วน', 'error'); return false; }
-        await db.setMeta('exportPrefs', { ...saved, ...opts, [fmt === 'pdf' ? 'coverPdf' : 'coverWord']: opts.cover });
+        const { filter, floorIds, ...keep } = opts;
+        await db.setMeta('exportPrefs', { ...saved, ...keep, [fmt === 'pdf' ? 'coverPdf' : 'coverWord']: opts.cover, lastFormat: fmt });
         await db.setMeta('orgName', opts.org);
         $('#expProg', b).style.display = '';
         $$('.modal-foot button', b.parentElement).forEach(x => x.disabled = true);
         const prog = (msg, frac) => { $('#expMsg', b).textContent = msg; if (frac != null) $('#expBar', b).style.width = Math.round(frac * 100) + '%'; };
         try {
           if (fmt === 'word') await exportWord(projectId, opts, prog);
-          else if (fmt === 'pdf') { await exportPdf(projectId, opts, prog); }
+          else if (fmt === 'pdf') await exportPdf(projectId, opts, prog);
           else if (fmt === 'image') await exportImages(projectId, opts, prog);
           else if (fmt === 'excel') await exportExcel(projectId, opts, prog);
-          else if (fmt === 'pack') await exportPack(projectId, prog);
+          else if (fmt === 'pack') await exportPack(projectId, prog, { original: opts.packOriginal, annotated: opts.packAnnotated, photos: opts.packPhotos });
           return true;
         } catch (e) {
           console.error(e);
@@ -297,6 +358,8 @@ export async function exportDialog(projectId) {
       } },
     ],
   });
+  sync();
+  return m.done;
 }
 
 const fileBase = (p) => safeName(`${p.code ? p.code + ' ' : ''}${p.name}`);
@@ -305,15 +368,16 @@ const fileBase = (p) => safeName(`${p.code ? p.code + ' ' : ''}${p.name}`);
 // Images
 // =====================================================================================
 async function exportImages(projectId, opts, prog = () => {}) {
-  const model = await buildModel(projectId, opts.floorIds);
+  const model = await buildModel(projectId, opts.floorIds, opts.filter);
   const legend = legendOf(model);
   const outs = [];
   for (let i = 0; i < model.perFloor.length; i++) {
     const { floor, items } = model.perFloor[i];
     prog(`กำลังสร้างรูป ${floor.name}`, i / model.perFloor.length);
-    const c = await planCanvas(floor, items, { maxDim: 4000, markerScale: opts.marker,
+    const c = await planCanvas(floor, items, { maxDim: opts.imgRes || 4000, markerScale: opts.marker,
       header: opts.imgHeader ? { title: `${model.project.name} — ${floor.name} (${items.length} จุด)`, legend } : null });
-    outs.push({ name: `${String(i + 1).padStart(2, '0')} ${safeName(floor.name)}.png`, blob: await canvasBlob(c) });
+    const jpg = opts.imgType === 'jpg';
+    outs.push({ name: `${String(i + 1).padStart(2, '0')} ${safeName(floor.name)}.${jpg ? 'jpg' : 'png'}`, blob: await canvasBlob(c, jpg ? 'image/jpeg' : 'image/png', 0.92) });
   }
   if (outs.length === 1) download(outs[0].blob, `${fileBase(model.project)} - ${outs[0].name}`);
   else {
@@ -331,7 +395,7 @@ async function exportImages(projectId, opts, prog = () => {}) {
 async function exportExcel(projectId, opts, prog = () => {}) {
   prog('กำลังเตรียมข้อมูล', 0.2);
   await loadScript('vendor/xlsx.full.min.js');
-  const model = await buildModel(projectId, opts.floorIds);
+  const model = await buildModel(projectId, opts.floorIds, opts.filter);
   const p = model.project;
   // union of field labels across both templates (same label → same column)
   const cols = [];
@@ -344,9 +408,11 @@ async function exportExcel(projectId, opts, prog = () => {}) {
     for (const f of it.tpl.fields) if (!f.hidden) r[f.label] = fieldText(f, it.d.data?.[f.key]);
     r['พื้นที่จากแปลน (ตร.ม.)'] = it.area != null ? +it.area.toFixed(2) : '';
     r['จำนวนรูป'] = it.d.photoIds?.length || 0;
-    const [x, y] = it.d.shape === 'point' ? it.d.pts[0] : centroid(it.d.pts);
-    r['ตำแหน่ง X (%)'] = +(x / it.floor.w * 100).toFixed(1);
-    r['ตำแหน่ง Y (%)'] = +(y / it.floor.h * 100).toFixed(1);
+    if (opts.xlsCoords) {
+      const [x, y] = it.d.shape === 'point' ? it.d.pts[0] : centroid(it.d.pts);
+      r['ตำแหน่ง X (%)'] = +(x / it.floor.w * 100).toFixed(1);
+      r['ตำแหน่ง Y (%)'] = +(y / it.floor.h * 100).toFixed(1);
+    }
     return r;
   });
   const wb = XLSX.utils.book_new();
@@ -359,6 +425,7 @@ async function exportExcel(projectId, opts, prog = () => {}) {
   ws['!autofilter'] = { ref: XLSX.utils.encode_range({ s: { r: 3, c: 0 }, e: { r: 3 + rows.length, c: keys.length - 1 } }) };
   XLSX.utils.book_append_sheet(wb, ws, 'รายการทั้งหมด');
 
+  if (opts.xlsSummary !== false) {
   const g = model.groups.map(gr => ({
     'ลำดับ': gr.index, 'ประเภทการตรวจ': TYPE_LABELS[gr.type], [gr.first.elementLabel]: gr.element, 'หัวข้อความเสียหาย': gr.title,
     'ระดับสูงสุด': gr.worst.sevText, 'จำนวน': gr.items.length,
@@ -377,6 +444,7 @@ async function exportExcel(projectId, opts, prog = () => {}) {
   const ws3 = XLSX.utils.json_to_sheet(fl);
   ws3['!cols'] = [{ wch: 24 }, { wch: 10 }, { wch: 10 }, { wch: 10 }, { wch: 10 }, { wch: 10 }];
   XLSX.utils.book_append_sheet(wb, ws3, 'สรุปตามชั้น');
+  }
   prog('กำลังบันทึก', 0.9);
   XLSX.writeFile(wb, `${fileBase(p)} - รายการความเสียหาย.xlsx`);
   toast('ส่งออก Excel แล้ว', 'ok');
@@ -392,7 +460,7 @@ async function exportWord(projectId, opts, prog = () => {}) {
   prog('กำลังโหลดไลบรารี', 0.05);
   await loadScript('vendor/docx.iife.js');
   const D = window.docx;
-  const model = await buildModel(projectId, opts.floorIds);
+  const model = await buildModel(projectId, opts.floorIds, opts.filter);
   const p = model.project;
   const PAGE_W = 11906, PAGE_H = 16838, MARGIN = 1134; // A4, 2 cm
   const CW = PAGE_W - MARGIN * 2; // content width (twips)
@@ -764,7 +832,7 @@ async function paginate(blocks, host, headText) {
 
 async function exportPdf(projectId, opts, prog = () => {}) {
   await ensureFonts();
-  const model = await buildModel(projectId, opts.floorIds);
+  const model = await buildModel(projectId, opts.floorIds, opts.filter);
   const p = model.project;
   const urls = {};
   const blocks = await buildPdfBlocks(model, opts, urls, prog);
@@ -814,7 +882,8 @@ async function exportPdf(projectId, opts, prog = () => {}) {
 // =====================================================================================
 const PACK_FORMAT = 'defect-mapper-pack';
 
-export async function exportPack(projectId, prog = () => {}) {
+export async function exportPack(projectId, prog = () => {}, popts = {}) {
+  const po = { original: true, annotated: true, photos: true, ...popts };
   const busy = toastBusy('กำลังสร้างแพ็กข้อมูล…');
   try {
     await loadScript('vendor/jszip.min.js');
@@ -832,11 +901,12 @@ export async function exportPack(projectId, prog = () => {}) {
     for (let i = 0; i < floors.length; i++) {
       const f = floors[i];
       prog(`แปลน ${f.name}`, i / floors.length * 0.5);
-      await addBlob(f.blobId, `plans/original/${String(i + 1).padStart(2, '0')}_${safeName(f.name)}.${ext(await db.getBlob(f.blobId))}`);
+      if (po.original) await addBlob(f.blobId, `plans/original/${String(i + 1).padStart(2, '0')}_${safeName(f.name)}.${ext(await db.getBlob(f.blobId))}`);
+      if (!po.annotated) continue;
       const c = await planCanvas(f, model.perFloor[i].items, { maxDim: 3000, header: { title: `${p.name} — ${f.name}`, legend: legendOf(model) } });
       zip.file(`plans/annotated/${String(i + 1).padStart(2, '0')}_${safeName(f.name)}.png`, await canvasBlob(c));
     }
-    for (const it of model.items) {
+    for (const it of po.photos ? model.items : []) {
       for (let j = 0; j < (it.d.photoIds || []).length; j++) {
         const id = it.d.photoIds[j];
         const b = await db.getBlob(id);
@@ -939,6 +1009,7 @@ export async function importPack(file) {
   const floorMap = {};
   for (const f of data.floors) {
     const nf = { ...f, id: uid(), projectId: p.id, blobId: await blobFor(f.blobId) };
+    if (!nf.blobId) throw new Error('แพ็กนี้ส่งออกโดยไม่รวมแปลนต้นฉบับ จึงนำเข้ากลับไม่ได้');
     floorMap[f.id] = nf.id;
     await db.put('floors', nf);
   }
