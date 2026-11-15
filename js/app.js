@@ -2,6 +2,11 @@ import { db, blobUrl, forgetUrl, requestPersistence } from './db.js';
 import { $, $$, esc, h, modal, confirmBox, toast, pickFiles, compressImage, fmtDate } from './utils.js';
 import { newProject, touch } from './project.js';
 import { TYPE_LABELS } from './templates.js';
+import * as sync from './sync.js';
+
+const applyMode = () => document.body.classList.toggle('viewer', !sync.canEdit());
+sync.onChange(applyMode);
+applyMode();
 
 const app = $('#app');
 const ACCENTS = ['#1f3a5f', '#2563eb', '#0f766e', '#15803d', '#ca8a04', '#ea580c', '#dc2626', '#be185d', '#7c3aed', '#475569'];
@@ -22,74 +27,131 @@ async function route() {
 window.addEventListener('hashchange', route);
 
 // ---------------- home ----------------
-async function renderHome() {
+let lastPull = 0, remoteCounts = {}, homeTimer = null;
+async function renderHome(fromPull = false) {
   document.title = 'Defect Mapper — โครงการทั้งหมด';
+  const editable = sync.canEdit();
   const projects = (await db.all('projects')).sort((a, b) => b.updatedAt - a.updatedAt);
   const floors = await db.all('floors');
   const defects = await db.all('defects');
   const cntF = {}, cntD = {};
   floors.forEach(f => cntF[f.projectId] = (cntF[f.projectId] || 0) + 1);
   defects.forEach(d => cntD[d.projectId] = (cntD[d.projectId] || 0) + 1);
+  for (const [pid, c] of Object.entries(remoteCounts)) { if (c) { cntF[pid] = c.floors; cntD[pid] = c.defects; } }
+  const q0 = $('#q')?.value || '';
 
   app.innerHTML = '';
   const page = h(`<div>
     <div class="home-top"><div class="inner">
       <div class="brand"><div class="logo">${PIN_LOGO}</div><div><h1>Defect Mapper</h1><p>ระบบปักตำแหน่งความเสียหาย-ข้อบกพร่องบนแบบแปลน</p></div></div>
       <div class="spacer"></div>
-      <button class="btn" id="btnImport" title="นำเข้าไฟล์แพ็กข้อมูลโครงการ (.zip)">⤒ นำเข้าโครงการ</button>
-      <button class="btn primary" id="btnNew">＋ โครงการใหม่</button>
+      <span data-sync></span>
+      ${sync.REMOTE ? `<button class="btn" id="btnAuth">${editable ? '🔓 ออกจากโหมดแก้ไข' : '🔒 เข้าโหมดแก้ไข'}</button>` : ''}
+      <button class="btn edit-only" id="btnImport" title="นำเข้าไฟล์แพ็กข้อมูลโครงการ (.zip)">⤒ นำเข้าโครงการ</button>
+      <button class="btn primary edit-only" id="btnNew">＋ โครงการใหม่</button>
     </div></div>
     <div class="home-body">
       <div class="home-tools">
-        <input class="inp" id="q" type="text" placeholder="ค้นหาชื่อ / รหัสโครงการ / ลูกค้า">
-        <span class="muted" style="margin-left:auto;font-size:13px">ข้อมูลทั้งหมดเก็บอยู่ในเบราว์เซอร์นี้ — ควรส่งออก “แพ็กข้อมูลโครงการ” เป็นระยะเพื่อสำรอง</span>
+        <input class="inp" id="q" type="text" placeholder="ค้นหาชื่อ / รหัสโครงการ / ลูกค้า" value="${esc(q0)}">
+        <span class="muted" style="margin-left:auto;font-size:13px">${sync.REMOTE
+          ? 'ข้อมูลเก็บไว้ที่ Google Drive ส่วนกลาง — ทุกคนที่มีลิงก์ดูได้ แก้ไขได้เมื่อใส่รหัส'
+          : 'ข้อมูลทั้งหมดเก็บอยู่ในเบราว์เซอร์นี้ — ควรส่งออก “แพ็กข้อมูลโครงการ” เป็นระยะเพื่อสำรอง'}</span>
       </div>
       <div class="cards" id="cards"></div>
     </div></div>`);
   app.appendChild(page);
+  sync.renderStatus();
   $('#btnNew').onclick = () => projectDialog();
   $('#btnImport').onclick = importProject;
+  if ($('#btnAuth')) $('#btnAuth').onclick = () => (editable ? (sync.logout(), renderHome()) : editLogin(() => renderHome()));
 
   const cards = $('#cards');
-  const draw = async (q = '') => {
+  const draw = (q = '') => {
     cards.innerHTML = '';
-    const nc = h(`<div class="pcard new"><div class="plus">＋</div><div>สร้างโครงการใหม่</div></div>`);
-    nc.onclick = () => projectDialog();
-    cards.appendChild(nc);
+    if (editable) {
+      const nc = h(`<div class="pcard new"><div class="plus">＋</div><div>สร้างโครงการใหม่</div></div>`);
+      nc.onclick = () => projectDialog();
+      cards.appendChild(nc);
+    }
     const ql = q.trim().toLowerCase();
     for (const p of projects) {
       if (ql && ![p.name, p.code, p.client, p.location].join(' ').toLowerCase().includes(ql)) continue;
-      const cover = p.coverBlobId ? await blobUrl(p.coverBlobId) : null;
+      const localOnly = sync.REMOTE && !sync.isKnown(p.id);
       const c = h(`<div class="pcard" style="--accent:${esc(p.accent)}">
-        ${cover ? `<div class="cover" style="background-image:url('${cover}')"></div>` : ''}
+        ${p.coverBlobId ? `<div class="cover"></div>` : ''}
         <button class="icon-btn menu-btn" title="ตัวเลือก">⋯</button>
         <div class="body">
+          ${localOnly ? `<div class="local-tag" title="โครงการนี้ยังอยู่เฉพาะในเบราว์เซอร์เครื่องนี้ คนอื่นยังมองไม่เห็น">เฉพาะเครื่องนี้</div>` : ''}
           ${p.code ? `<div class="code">${esc(p.code)}</div>` : ''}
           <h3>${esc(p.name)}</h3>
           ${p.client ? `<div class="meta">${esc(p.client)}</div>` : ''}
           ${p.location ? `<div class="meta">📍 ${esc(p.location)}</div>` : ''}
           <div class="stats"><span><b>${cntF[p.id] || 0}</b> ชั้น/แปลน</span><span><b>${cntD[p.id] || 0}</b> จุด</span><span style="margin-left:auto">${fmtDate(p.updatedAt)}</span></div>
         </div></div>`);
+      if (p.coverBlobId) blobUrl(p.coverBlobId).then(u => { if (u) $('.cover', c).style.backgroundImage = `url('${u}')`; });
       c.onclick = (e) => { if (!e.target.closest('.menu-btn')) location.hash = `#/p/${p.id}`; };
       $('.menu-btn', c).onclick = (e) => {
         e.stopPropagation();
-        dropdown(e.currentTarget, [
-          { label: '✎ แก้ไขข้อมูลโครงการ', fn: () => projectDialog(p) },
-          { label: '⤓ ส่งออก (Word / PDF / Excel / รูป / แพ็กข้อมูล)…', fn: async () => { const { exportDialog } = await import('./export.js'); exportDialog(p.id); } },
-          '-',
-          { label: '🗑 ลบโครงการ', danger: true, fn: async () => {
-            if (await confirmBox(`ลบโครงการ “${p.name}” พร้อมแปลนและรูปทั้งหมด? การลบไม่สามารถย้อนกลับได้`, { ok: 'ลบโครงการ', danger: true })) {
-              await db.deleteProject(p.id); toast('ลบโครงการแล้ว'); renderHome();
-            }
-          } },
-        ]);
+        const items = [];
+        if (editable && localOnly) items.push({ label: '☁ อัปโหลดขึ้นระบบกลาง (ให้คนอื่นเห็น)', fn: async () => { await sync.uploadProject(p.id); toast('กำลังอัปโหลด — ดูสถานะที่มุมขวาบน', 'ok', 3500); } });
+        if (editable) items.push({ label: '✎ แก้ไขข้อมูลโครงการ', fn: () => projectDialog(p) });
+        items.push({ label: '⤓ ส่งออก (Word / PDF / Excel / รูป / แพ็กข้อมูล)…', fn: async () => { const { exportDialog } = await import('./export.js'); exportDialog(p.id); } });
+        if (editable) items.push('-', { label: '🗑 ลบโครงการ', danger: true, fn: async () => {
+          const msg = sync.REMOTE && !localOnly ? `ลบโครงการ “${p.name}” พร้อมแปลนและรูปทั้งหมด ออกจากระบบกลาง? ทุกคนจะมองไม่เห็นโครงการนี้อีก และย้อนกลับไม่ได้` : `ลบโครงการ “${p.name}” พร้อมแปลนและรูปทั้งหมด? การลบไม่สามารถย้อนกลับได้`;
+          if (await confirmBox(msg, { ok: 'ลบโครงการ', danger: true })) {
+            await db.deleteProject(p.id, { local: localOnly }); toast('ลบโครงการแล้ว'); renderHome();
+          }
+        } });
+        dropdown(e.currentTarget, items);
       };
       cards.appendChild(c);
     }
-    if (!projects.length) cards.appendChild(h(`<div class="empty">ยังไม่มีโครงการ — เริ่มจากกด “สร้างโครงการใหม่”</div>`));
+    if (!projects.length) cards.appendChild(h(`<div class="empty">${sync.REMOTE && !fromPull ? 'กำลังโหลดโครงการจากระบบกลาง…' : editable ? 'ยังไม่มีโครงการ — เริ่มจากกด “สร้างโครงการใหม่”' : 'ยังไม่มีโครงการ'}</div>`));
+    const localCount = sync.REMOTE && editable ? projects.filter(p => !sync.isKnown(p.id)).length : 0;
+    if (localCount && fromPull) {
+      const bar = h(`<div class="upload-bar">มี ${localCount} โครงการที่อยู่เฉพาะในเครื่องนี้ <button class="btn sm primary">☁ อัปโหลดทั้งหมดขึ้นระบบกลาง</button></div>`);
+      $('button', bar).onclick = async () => { for (const p of projects.filter(p => !sync.isKnown(p.id))) await sync.uploadProject(p.id); bar.remove(); toast('กำลังอัปโหลด — ดูสถานะที่มุมขวาบน', 'ok', 3500); };
+      cards.before(bar);
+    }
   };
   $('#q').oninput = (e) => draw(e.target.value);
-  draw();
+  draw(q0);
+
+  if (sync.REMOTE) {
+    clearTimeout(homeTimer);
+    homeTimer = setTimeout(() => {
+      if (!location.hash.startsWith('#/p/') && !document.querySelector('.modal-back, .dropdown') && !document.hidden && !$('#q')?.value) renderHome();
+    }, 30000);
+  }
+  if (sync.REMOTE && !fromPull && Date.now() - lastPull > 5000) {
+    try {
+      const r = await sync.pullIndex();
+      remoteCounts = r.counts; lastPull = Date.now();
+      if (!location.hash.startsWith('#/p/')) renderHome(true);
+    } catch (e) {
+      console.warn(e);
+      toast('เชื่อมต่อระบบกลางไม่ได้ — แสดงข้อมูลที่เคยโหลดไว้ในเครื่อง', 'error', 5000);
+    }
+  }
+}
+
+export function editLogin(after) {
+  const m = modal({
+    title: 'เข้าโหมดแก้ไข',
+    body: `<p class="muted" style="margin-top:0">ใส่รหัสแก้ไขของทีม เพื่อปักตำแหน่ง แก้ไข หรือลบข้อมูล (ระบบจะจำรหัสไว้ในเบราว์เซอร์นี้)</p>
+      <label class="fld"><span>รหัสแก้ไข</span><input type="password" autocomplete="current-password"></label><span class="err" id="authErr" style="color:var(--danger);font-size:13px"></span>`,
+    actions: [{ label: 'ยกเลิก', value: null }, { label: 'เข้าสู่โหมดแก้ไข', kind: 'primary', onClick: async (b) => {
+      const v = $('input', b).value;
+      if (!v) return false;
+      $('#authErr', b).textContent = 'กำลังตรวจสอบ…';
+      try {
+        if (await sync.login(v)) { toast('เข้าสู่โหมดแก้ไขแล้ว', 'ok'); after && after(); return true; }
+        $('#authErr', b).textContent = 'รหัสไม่ถูกต้อง';
+      } catch (e) { $('#authErr', b).textContent = 'เชื่อมต่อระบบกลางไม่ได้: ' + e.message; }
+      return false;
+    } }],
+  });
+  $('input', m.body).addEventListener('keydown', (e) => { if (e.key === 'Enter') $('.modal-foot .btn.primary', m.el).click(); });
 }
 
 export function dropdown(anchor, items) {

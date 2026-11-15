@@ -3,7 +3,8 @@ import { $, $$, esc, h, modal, confirmBox, promptBox, toast, pickFiles, compress
   loadImage, polyArea, centroid } from './utils.js';
 import { loadBundle, touch, suggestNo, isDuplicateNo, renumberAll } from './project.js';
 import { TYPE_LABELS, fieldByRole, severityInfo, NO_SEVERITY_COLOR, textOn, defectTitle } from './templates.js';
-import { dropdown, projectDialog } from './app.js';
+import { dropdown, projectDialog, editLogin } from './app.js';
+import * as sync from './sync.js';
 
 const ICON = {
   select: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M5 3l14 8-6 1.5L10 19z"/></svg>',
@@ -25,6 +26,13 @@ const TOOL_HINT = {
 let S = null; // workspace state
 
 export async function openWorkspace(root, projectId) {
+  if (sync.REMOTE) {
+    if (!(await db.get('projects', projectId))) root.innerHTML = '<div class="empty" style="padding-top:120px">กำลังโหลดโครงการจากระบบกลาง…</div>';
+    try {
+      const r = await sync.pullProject(projectId);
+      if (r === 'deleted') { toast('โครงการนี้ถูกลบออกจากระบบกลางแล้ว', 'error'); await db.deleteProject(projectId, { local: true }); return false; }
+    } catch (e) { console.warn(e); toast('เชื่อมต่อระบบกลางไม่ได้ — แสดงข้อมูลที่เคยโหลดไว้ในเครื่อง', 'error', 5000); }
+  }
   const b = await loadBundle(projectId);
   if (!b) return false;
   S = {
@@ -37,7 +45,42 @@ export async function openWorkspace(root, projectId) {
   document.title = b.project.name + ' — Defect Mapper';
   renderShell();
   await selectFloor(S.floorId, true);
+  startPolling();
   return true;
+}
+
+const canEdit = () => sync.canEdit();
+
+// ---- keep in sync with changes made by other people
+let pollTimer = null;
+function startPolling() {
+  clearInterval(pollTimer);
+  if (!sync.REMOTE) return;
+  const mine = S;
+  pollTimer = setInterval(async () => {
+    if (S !== mine || !document.body.contains($('#canvas'))) { clearInterval(pollTimer); return; }
+    if (document.hidden || sync.pendingCount() || S.draft || gesture) return;
+    if (document.activeElement && $('#right')?.contains(document.activeElement)) return; // user is typing
+    try {
+      const pid = S.project.id;
+      const v = await sync.remoteVersion(pid);
+      if (v == null || (v === sync.localVersion(pid) && !sync.staleProjects.has(pid))) return;
+      if (await sync.pullProject(pid) !== true) return;
+      await reloadFromLocal();
+    } catch (e) { /* offline: try again next tick */ }
+  }, 15000);
+}
+
+async function reloadFromLocal() {
+  const b = await loadBundle(S.project.id);
+  if (!b) return;
+  const oldFloor = curFloor();
+  S.project = b.project; S.floors = b.floors; S.defects = b.defects;
+  if (S.selectedId && !selected()) S.selectedId = null;
+  renderTitle();
+  const nf = curFloor();
+  if (!nf || !oldFloor || nf.blobId !== oldFloor.blobId) await selectFloor(nf ? nf.id : (S.floors[0]?.id || null));
+  else { S.img = { w: nf.w, h: nf.h }; refreshAll(); renderCanvasBase(); }
 }
 
 const P = () => S.project;
@@ -61,12 +104,14 @@ function renderShell() {
     <div class="ws-top">
       <button class="btn ghost" id="back" title="กลับหน้ารวมโครงการ">← โครงการทั้งหมด</button>
       <div class="title"><h2 id="pname"></h2><div class="sub" id="psub"></div></div>
-      <button class="btn" id="btnTpl" title="แก้ไขหัวข้อและตัวเลือกความเสียหาย">⚙ หัวข้อความเสียหาย</button>
+      <span data-sync></span>
+      ${sync.REMOTE ? `<button class="btn ghost" id="btnAuth">${canEdit() ? '🔓 ออกโหมดแก้ไข' : '🔒 เข้าโหมดแก้ไข'}</button>` : ''}
+      <button class="btn edit-only" id="btnTpl" title="แก้ไขหัวข้อและตัวเลือกความเสียหาย">⚙ หัวข้อความเสียหาย</button>
       <button class="icon-btn" id="btnMore" title="เพิ่มเติม">⋯</button>
       <span class="exp-split"><button class="btn primary" id="btnExport" title="ส่งออกรายงาน">⤓ ส่งออก</button><button class="btn primary" id="btnExportMenu" title="เลือกรูปแบบไฟล์">▾</button></span>
     </div>
     <div class="ws-floors">
-      <button class="btn sm" id="btnImport" title="นำเข้ารูปแปลน (JPG/PNG) หรือ PDF ได้หลายไฟล์ในครั้งเดียว">＋ นำเข้าแปลนชั้น</button>
+      <button class="btn sm edit-only" id="btnImport" title="นำเข้ารูปแปลน (JPG/PNG) หรือ PDF ได้หลายไฟล์ในครั้งเดียว">＋ นำเข้าแปลนชั้น</button>
       <div class="floor-tabs" id="ftabs"></div>
     </div>
     <div class="ws-main">
@@ -105,10 +150,17 @@ function renderShell() {
       fn: () => openExport(f.id),
     })));
   };
+  sync.renderStatus();
+  if ($('#btnAuth')) $('#btnAuth').onclick = () => {
+    const rerender = async () => { renderShell(); await selectFloor(S.floorId); };
+    if (canEdit()) { sync.logout(); S.selectedId = S.selectedId; S.tool = 'select'; rerender(); }
+    else editLogin(rerender);
+  };
   $('#btnMore').onclick = (e) => dropdown(e.currentTarget, [
-    { label: '✎ แก้ไขข้อมูลโครงการ', fn: () => projectDialog(P(), () => { renderTitle(); refreshAll(); }) },
-    { label: '#  เรียงเลขลำดับใหม่ทั้งโครงการ (1…n)', fn: renumber },
-    '-',
+    ...(canEdit() ? [
+      { label: '✎ แก้ไขข้อมูลโครงการ', fn: () => projectDialog(P(), () => { renderTitle(); refreshAll(); }) },
+      { label: '#  เรียงเลขลำดับใหม่ทั้งโครงการ (1…n)', fn: renumber },
+      '-'] : []),
     { label: '⤓ ส่งออกแพ็กข้อมูล / สำรอง (.zip)', fn: async () => { const { exportPack } = await import('./export.js'); exportPack(P().id); } },
   ]);
   $('#lfilter').oninput = (e) => { S.filter = e.target.value; renderList(); };
@@ -144,10 +196,10 @@ function renderTabs() {
   for (const f of S.floors) {
     const n = S.defects.filter(d => d.floorId === f.id).length;
     const t = h(`<div class="ftab ${f.id === S.floorId ? 'on' : ''}" title="ดับเบิลคลิกเพื่อเปลี่ยนชื่อ">
-      <span>${esc(f.name)}</span><span class="cnt">${n}</span><span class="more">⋮</span></div>`);
+      <span>${esc(f.name)}</span><span class="cnt">${n}</span>${canEdit() ? '<span class="more">⋮</span>' : ''}</div>`);
     t.onclick = (e) => { if (e.target.closest('.more')) return; if (f.id !== S.floorId) selectFloor(f.id); };
-    t.ondblclick = () => renameFloor(f);
-    $('.more', t).onclick = (e) => {
+    t.ondblclick = () => { if (canEdit()) renameFloor(f); };
+    if ($('.more', t)) $('.more', t).onclick = (e) => {
       e.stopPropagation();
       const i = S.floors.indexOf(f);
       dropdown(e.currentTarget, [
@@ -315,6 +367,19 @@ function renderList() {
 function renderTools() {
   const bar = $('#tools');
   const tool = (id, label, key) => `<button class="tool ${S.tool === id ? 'on' : ''}" data-tool="${id}" title="${esc(TOOL_HINT[id])}">${ICON[id]}<span>${label}</span><kbd>${key}</kbd></button>`;
+  if (!canEdit()) {
+    bar.innerHTML = `${tool('select', 'เลื่อน/ดู', 'V')}
+      <button class="tool ${S.showLabels ? 'on' : ''}" id="tLabels" title="แสดง/ซ่อนเลขบนแปลน">${ICON.label}<span>แสดงเลข</span><kbd>L</kbd></button>
+      <span class="tsep"></span>
+      <button class="icon-btn" id="zOut" title="ซูมออก (−)">－</button><span class="zoom-val" id="zVal">100%</span><button class="icon-btn" id="zIn" title="ซูมเข้า (+)">＋</button>
+      <button class="btn sm ghost" id="zFit" title="พอดีหน้าจอ (F)">พอดีจอ</button>
+      <span class="hint" style="margin-left:10px">โหมดดูอย่างเดียว — กด “🔒 เข้าโหมดแก้ไข” ด้านบนเพื่อแก้ไข</span>`;
+    $('[data-tool]', bar).onclick = () => setTool('select');
+    $('#tLabels').onclick = () => { S.showLabels = !S.showLabels; renderTools(); renderPins(); };
+    $('#zIn').onclick = () => zoomAt(1.25); $('#zOut').onclick = () => zoomAt(0.8); $('#zFit').onclick = fitView;
+    updateZoomLabel();
+    return;
+  }
   bar.innerHTML = `
     ${tool('select', 'เลือก/เลื่อน', 'V')}
     <span class="tsep"></span>
@@ -340,6 +405,7 @@ function renderTools() {
 }
 
 function setTool(t) {
+  if (!canEdit()) t = 'select';
   S.tool = t;
   S.draft = null;
   renderTools();
@@ -538,6 +604,7 @@ function onDown(e) {
   const target = e.target.closest('[data-id]');
   const base = { sx0: w.sx, sy0: w.sy, x0: w.x, y0: w.y, moved: false, tx0: S.view.tx, ty0: S.view.ty };
   if (e.button === 1 || e.button === 2 || spaceDown) { gesture = { type: 'pan', ...base }; return; }
+  if (S.tool === 'select' && target && !canEdit()) { gesture = { type: 'pan', clickTarget: target, ...base }; return; }
   if (S.tool === 'select' && target) {
     const d = S.defects.find(x => x.id === target.dataset.id);
     if (target.dataset.vertex != null) gesture = { type: 'vertex', d, vi: +target.dataset.vertex, orig: d.pts.map(p => [...p]), ...base };
@@ -690,6 +757,7 @@ function onKey(e) {
     select(null); return;
   }
   if (typing) return;
+  if (!canEdit() && !['f', 'l', '+', '=', '-', ' '].includes(e.key.toLowerCase())) return;
   if (e.key === ' ') { spaceDown = true; e.preventDefault(); window.addEventListener('keyup', (ev) => { if (ev.key === ' ') spaceDown = false; }, { once: true }); return; }
   if (S.draft?.kind === 'area') {
     if (e.key === 'Enter') { finishArea(); return; }
@@ -722,6 +790,7 @@ function centerOn(d) {
 
 // ===================================================================== defects
 async function createDefect(shape, pts) {
+  if (!canEdit()) return;
   const p = P();
   const prev = S.defects.find(d => d.id === S.lastCreatedId) || selected();
   const d = {
@@ -745,6 +814,7 @@ function select(id) {
 }
 
 async function deleteDefect(d) {
+  if (!canEdit()) return;
   if (!(await confirmBox(`ลบจุดที่ ${d.no}?`, { ok: 'ลบ', danger: true }))) return;
   for (const ph of d.photoIds || []) { forgetUrl(ph); await db.delBlob(ph); }
   await db.del('defects', d.id);
@@ -765,7 +835,7 @@ export function rectDims(floor, d) {
 }
 
 // ===================================================================== right panel
-const saveSel = debounce(async (d) => { await db.put('defects', d); touch(P()); }, 350);
+const saveSel = debounce(async (d) => { if (!sync.canEdit()) return; await db.put('defects', d); touch(P()); }, 350);
 
 function renderRight(keepScroll = false) {
   const box = $('#right');
@@ -800,11 +870,11 @@ function renderRight(keepScroll = false) {
       <p class="hint" style="margin-top:6px">รูปแรกจะใช้เป็นรูปหลักในรายงาน • คลิกเพื่อขยาย</p>
     </div>
     <div class="rfoot">
-      <button class="btn sm danger" id="rDel">ลบจุดนี้</button>
-      <button class="btn sm" id="rMove" title="ย้ายจุดนี้ไปชั้นอื่น">ย้ายชั้น</button>
+      <button class="btn sm danger edit-only" id="rDel">ลบจุดนี้</button>
+      <button class="btn sm edit-only" id="rMove" title="ย้ายจุดนี้ไปชั้นอื่น">ย้ายชั้น</button>
       <span class="spacer"></span>
-      <button class="btn sm" id="rCopyPrev" title="คัดลอกรายละเอียดจากจุดอื่น">คัดลอกจาก…</button>
-      <button class="btn sm primary" id="rDone">เสร็จ</button>
+      <button class="btn sm edit-only" id="rCopyPrev" title="คัดลอกรายละเอียดจากจุดอื่น">คัดลอกจาก…</button>
+      <button class="btn sm primary" id="rDone">${canEdit() ? 'เสร็จ' : 'ปิด'}</button>
     </div></div>`);
   box.appendChild(el);
   $('#rClose').onclick = $('#rDone').onclick = () => select(null);
@@ -853,6 +923,7 @@ function renderRight(keepScroll = false) {
 
   renderFields($('#fields'), d, tpl);
   renderPhotos(d);
+  if (!canEdit()) $$('input, select, textarea, .seg button, #useArea, .listed button, #fields .btn', $('.rbody', box)).forEach(x => { x.disabled = true; });
   if (scroll) $('.rbody', box).scrollTop = scroll;
 }
 

@@ -39,43 +39,72 @@ async function store(name, mode = 'readonly') {
   return db.transaction(name, mode).objectStore(name);
 }
 
+const SYNCED = new Set(['projects', 'floors', 'defects']);
+// hooks are installed by sync.js when a shared (Google Drive) backend is configured
+export const hooks = { onPut: null, onDel: null, onBlob: null, onDelBlob: null, fetchBlob: null };
+
 export const db = {
   async get(name, key) { return wrap((await store(name)).get(key)); },
   async all(name) { return wrap((await store(name)).getAll()); },
   async byProject(name, projectId) {
     return wrap((await store(name)).index('projectId').getAll(projectId));
   },
-  async put(name, value) { return wrap((await store(name, 'readwrite')).put(value)); },
-  async del(name, key) { return wrap((await store(name, 'readwrite')).delete(key)); },
+  // local-only writes (used when applying data pulled from the server)
+  async rawPut(name, value) { return wrap((await store(name, 'readwrite')).put(value)); },
+  async rawDel(name, key) { return wrap((await store(name, 'readwrite')).delete(key)); },
+
+  async put(name, value) {
+    const r = await this.rawPut(name, value);
+    if (hooks.onPut && SYNCED.has(name)) hooks.onPut(name, value);
+    return r;
+  },
+  async del(name, key) {
+    const rec = hooks.onDel && SYNCED.has(name) ? await this.get(name, key) : null;
+    const r = await this.rawDel(name, key);
+    if (rec) hooks.onDel(name, rec);
+    return r;
+  },
 
   async putBlob(blob, id = uid()) {
-    await this.put('blobs', { id, blob, type: blob.type });
+    await this.rawPut('blobs', { id, blob, type: blob.type });
+    if (hooks.onBlob) hooks.onBlob(id);
     return id;
   },
   async getBlob(id) {
     if (!id) return null;
     const r = await this.get('blobs', id);
-    return r ? r.blob : null;
+    if (r) return r.blob;
+    if (hooks.fetchBlob) {
+      const b = await hooks.fetchBlob(id);
+      if (b) { await this.rawPut('blobs', { id, blob: b, type: b.type }); return b; }
+    }
+    return null;
   },
-  async delBlob(id) { if (id) await this.del('blobs', id); },
+  async delBlob(id) {
+    if (!id) return;
+    await this.rawDel('blobs', id);
+    if (hooks.onDelBlob) hooks.onDelBlob(id);
+  },
 
   async getMeta(key, fallback = null) {
     const r = await this.get('meta', key);
     return r ? r.value : fallback;
   },
-  async setMeta(key, value) { return this.put('meta', { key, value }); },
+  async setMeta(key, value) { return this.rawPut('meta', { key, value }); },
 
-  async deleteProject(projectId) {
+  // Remove a project locally. When synced, the server deletes the whole project (and its files) in one op.
+  async deleteProject(projectId, { local = false } = {}) {
     const p = await this.get('projects', projectId);
     const floors = await this.byProject('floors', projectId);
     const defects = await this.byProject('defects', projectId);
-    for (const f of floors) { await this.delBlob(f.blobId); await this.del('floors', f.id); }
+    for (const f of floors) { if (f.blobId) await this.rawDel('blobs', f.blobId); await this.rawDel('floors', f.id); }
     for (const d of defects) {
-      for (const ph of d.photoIds || []) await this.delBlob(ph);
-      await this.del('defects', d.id);
+      for (const ph of d.photoIds || []) if (ph) await this.rawDel('blobs', ph);
+      await this.rawDel('defects', d.id);
     }
-    if (p) await this.delBlob(p.coverBlobId);
-    await this.del('projects', projectId);
+    if (p?.coverBlobId) await this.rawDel('blobs', p.coverBlobId);
+    await this.rawDel('projects', projectId);
+    if (!local && p && hooks.onDel) hooks.onDel('projects', p);
   },
 };
 
