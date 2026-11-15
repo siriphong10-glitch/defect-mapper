@@ -3,6 +3,17 @@ import { $, $$, esc, h, modal, confirmBox, toast, pickFiles, compressImage, fmtD
 import { newProject, touch } from './project.js';
 import { TYPE_LABELS } from './templates.js';
 import * as sync from './sync.js';
+import { BUILD } from './version.js';
+
+// Make sure every device runs the latest deployed version (old cached copies used to run without the shared storage)
+if (BUILD !== 'dev') {
+  fetch('version.json', { cache: 'no-store' }).then(r => r.json()).then(j => {
+    if (j.v && j.v !== BUILD) {
+      if (sessionStorage.getItem('dm_reloaded') !== j.v) { sessionStorage.setItem('dm_reloaded', j.v); location.reload(); }
+      else toast('มีเวอร์ชันใหม่ของแอพ — กด Ctrl+F5 เพื่อโหลดใหม่', 'error', 8000);
+    }
+  }).catch(() => {});
+}
 
 const applyMode = () => document.body.classList.toggle('viewer', !sync.canEdit());
 sync.onChange(applyMode);

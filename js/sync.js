@@ -171,8 +171,8 @@ export async function pullIndex() {
   for (const [pid, ent] of Object.entries(idx.projects || {})) {
     counts[pid] = ent.counts;
     known.add(pid);
-    if (pend.has(pid)) continue;
     const local = await db.get('projects', pid);
+    if (pend.has(pid) && local) continue;
     if (!local || (ent.project.updatedAt || 0) >= (local.updatedAt || 0)) await db.rawPut('projects', ent.project);
   }
   // projects that were on the server but are gone now → removed by someone else

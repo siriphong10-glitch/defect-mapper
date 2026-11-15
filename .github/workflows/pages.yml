@@ -18,6 +18,14 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
+      - name: Stamp build version (cache busting)
+        run: |
+          V="${GITHUB_SHA::8}"
+          echo "{\"v\":\"$V\"}" > version.json
+          echo "export const BUILD = '$V';" > js/version.js
+          sed -i -E "s#(from '|import\\(')(\\./[^']+\\.js)'#\\1\\2?v=$V'#g" js/*.js
+          sed -i -E "s#src=\"js/app\\.js\"#src=\"js/app.js?v=$V\"#; s#href=\"css/app\\.css\"#href=\"css/app.css?v=$V\"#" index.html
+          grep -c "?v=$V" js/*.js index.html
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
