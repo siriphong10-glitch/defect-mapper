@@ -26,6 +26,7 @@ const PIN_LOGO = `<svg width="22" height="22" viewBox="0 0 24 24"><path d="M12 2
 
 // ---------------- router ----------------
 async function route() {
+  if (handleEditHash()) { renderHome(); return; }
   const m = location.hash.match(/^#\/p\/([\w-]+)/);
   if (m) {
     const { openWorkspace } = await import('./workspace.js');
@@ -58,6 +59,7 @@ async function renderHome(fromPull = false) {
       <div class="spacer"></div>
       <span data-sync></span>
       ${sync.REMOTE ? `<button class="btn" id="btnAuth">${editable ? '🔓 ออกจากโหมดแก้ไข' : '🔒 เข้าโหมดแก้ไข'}</button>` : ''}
+      ${sync.REMOTE ? `<button class="btn" id="btnLinks" title="คัดลอกลิงก์สำหรับส่งให้คนอื่น">🔗 ลิงก์</button>` : ''}
       <button class="btn edit-only" id="btnImport" title="นำเข้าไฟล์แพ็กข้อมูลโครงการ (.zip)">⤒ นำเข้าโครงการ</button>
       <button class="btn primary edit-only" id="btnNew">＋ โครงการใหม่</button>
     </div></div>
@@ -74,6 +76,7 @@ async function renderHome(fromPull = false) {
   sync.renderStatus();
   $('#btnNew').onclick = () => projectDialog();
   $('#btnImport').onclick = importProject;
+  if ($('#btnLinks')) $('#btnLinks').onclick = (e) => shareLinks(e.currentTarget);
   if ($('#btnAuth')) $('#btnAuth').onclick = () => (editable ? (sync.logout(), renderHome()) : editLogin(() => renderHome()));
 
   const cards = $('#cards');
@@ -295,6 +298,34 @@ async function importProject() {
     console.error(e);
     toast('นำเข้าไม่สำเร็จ: ' + e.message, 'error', 5000);
   }
+}
+
+const BASE_URL = location.origin + location.pathname;
+async function copyText(text, what) {
+  try { await navigator.clipboard.writeText(text); toast(`คัดลอก${what}แล้ว`, 'ok'); }
+  catch { modal({ title: what, body: `<label class="fld"><span>คัดลอกลิงก์นี้</span><input type="text" value="${esc(text)}" readonly onfocus="this.select()"></label>`, actions: [{ label: 'ปิด' }] }); }
+}
+function shareLinks(anchor) {
+  const items = [{ label: '👁 คัดลอกลิงก์สำหรับดู (ไม่ต้องใช้รหัส)', fn: () => copyText(BASE_URL, 'ลิงก์สำหรับดู') }];
+  if (sync.getKey()) items.push({ label: '✎ คัดลอกลิงก์สำหรับแก้ไข (ใส่รหัสในลิงก์แล้ว)', fn: async () => {
+    if (await confirmBox('ลิงก์นี้มีรหัสแก้ไขอยู่ในตัว ใครได้ลิงก์ไปจะแก้ไขและลบข้อมูลได้ทันที ส่งให้เฉพาะคนในทีมเท่านั้น (ถ้าลิงก์หลุด ให้เปลี่ยนรหัสใน Apps Script แล้วลิงก์เดิมจะใช้ไม่ได้)', { ok: 'คัดลอกลิงก์แก้ไข', title: 'ลิงก์สำหรับแก้ไข' }))
+      copyText(`${BASE_URL}#edit=${encodeURIComponent(sync.getKey())}`, 'ลิงก์สำหรับแก้ไข');
+  } });
+  else items.push({ label: '✎ ลิงก์สำหรับแก้ไข — เข้าโหมดแก้ไขก่อน', fn: () => editLogin(() => renderHome()) });
+  dropdown(anchor, items);
+}
+
+// Edit link: #edit=<key> → log in, then remove the key from the address bar
+function handleEditHash() {
+  const m = location.hash.match(/^#edit=(.+)$/);
+  if (!m || !sync.REMOTE) return false;
+  const k = decodeURIComponent(m[1]);
+  history.replaceState(null, '', BASE_URL + '#/');
+  sync.login(k).then(ok => {
+    toast(ok ? 'เข้าสู่โหมดแก้ไขแล้ว' : 'รหัสในลิงก์ไม่ถูกต้องหรือถูกเปลี่ยนแล้ว', ok ? 'ok' : 'error', 4000);
+    if (!location.hash.startsWith('#/p/')) renderHome();
+  }).catch(() => toast('เชื่อมต่อระบบกลางไม่ได้', 'error'));
+  return true;
 }
 
 export { renderHome };

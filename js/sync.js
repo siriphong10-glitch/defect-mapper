@@ -20,6 +20,7 @@ let state = 'idle', lastError = '';
 const listeners = new Set();
 
 export const canEdit = () => !REMOTE || !!editKey;
+export const getKey = () => editKey;
 export const isKnown = (pid) => known.has(pid);
 export const pendingCount = () => queue.length;
 
