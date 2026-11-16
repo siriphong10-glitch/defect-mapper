@@ -130,14 +130,23 @@ input.inp, select.inp, textarea.inp {
 .ws-top .title h2 { font-size: 17px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ws-top .title .sub { font-size: 12.5px; color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ws-floors { background: #fafbfc; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 8px; padding: 6px 14px; min-height: 46px; }
-.floor-tabs { display: flex; gap: 4px; overflow-x: auto; flex: 1; scrollbar-width: thin; }
-.ftab { display: inline-flex; align-items: center; gap: 6px; padding: 5px 6px 5px 12px; border-radius: 8px; border: 1px solid transparent; cursor: pointer; white-space: nowrap; font-size: 14px; color: var(--ink-2); }
-.ftab:hover { background: #fff; border-color: var(--line); }
-.ftab.on { background: var(--navy); color: #fff; }
-.ftab .cnt { font-size: 11.5px; background: rgba(0,0,0,.08); border-radius: 999px; padding: 0 7px; }
-.ftab.on .cnt { background: rgba(255,255,255,.22); }
-.ftab .more { width: 22px; height: 22px; border-radius: 6px; display: grid; place-items: center; opacity: .6; }
-.ftab .more:hover { opacity: 1; background: rgba(0,0,0,.1); }
+.floor-nav { flex: 1; min-width: 0; display: flex; }
+.fnav { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.fnav .icon-btn:disabled { opacity: .3; cursor: default; background: none; }
+.fpick { display: inline-flex; align-items: center; gap: 8px; min-width: 220px; max-width: min(460px, 50vw); padding: 5px 10px 5px 12px; border-radius: 8px; border: 1px solid var(--navy); background: var(--navy); color: #fff; cursor: pointer; font-size: 14px; }
+.fpick:hover { background: var(--navy-2); }
+.fpick .fname { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; text-align: left; }
+.fpick .cnt { font-size: 11.5px; background: rgba(255,255,255,.22); border-radius: 999px; padding: 0 8px; white-space: nowrap; }
+.fpick .fpos { font-size: 11.5px; opacity: .7; white-space: nowrap; }
+.fpick .caret { font-size: 11px; }
+.fpicker { min-width: 280px; max-width: 420px; }
+.fpicker .flist { max-height: min(60vh, 460px); overflow: auto; }
+.fpicker .flist button { align-items: center; }
+.fpicker .flist button.on { background: var(--head-2); font-weight: 600; }
+.fpicker .fi { width: 22px; text-align: right; color: var(--ink-3); font-size: 12px; flex: 0 0 auto; }
+.fpicker .fn { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fpicker .cnt { font-size: 11.5px; background: var(--line-2); border-radius: 999px; padding: 0 8px; }
+@media (max-width: 860px) { .fpick { min-width: 0; } .fpick .fpos { display: none; } }
 .ws-main { display: flex; min-height: 0; position: relative; }
 .ws-left { flex: 0 0 20%; max-width: 20%; min-width: 0; background: #fff; border-right: 1px solid var(--line); display: flex; flex-direction: column; position: relative; z-index: 6; transition: flex-basis .2s, max-width .2s; }
 .ws-left.collapsed { flex-basis: 0; max-width: 0; border-right: 0; }

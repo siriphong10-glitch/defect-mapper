@@ -112,7 +112,7 @@ function renderShell() {
     </div>
     <div class="ws-floors">
       <button class="btn sm edit-only" id="btnImport" title="นำเข้ารูปแปลน (JPG/PNG) หรือ PDF ได้หลายไฟล์ในครั้งเดียว">＋ นำเข้าแปลนชั้น</button>
-      <div class="floor-tabs" id="ftabs"></div>
+      <div class="floor-nav" id="ftabs"></div>
     </div>
     <div class="ws-main">
       <aside class="ws-left ${localStorage.getItem('dm_left_collapsed') === '1' ? 'collapsed' : ''}" id="left">
@@ -201,28 +201,66 @@ async function renumber() {
 function renderTabs() {
   const box = $('#ftabs');
   box.innerHTML = '';
-  for (const f of S.floors) {
-    const n = S.defects.filter(d => d.floorId === f.id).length;
-    const t = h(`<div class="ftab ${f.id === S.floorId ? 'on' : ''}" title="ดับเบิลคลิกเพื่อเปลี่ยนชื่อ">
-      <span>${esc(f.name)}</span><span class="cnt">${n}</span>${canEdit() ? '<span class="more">⋮</span>' : ''}</div>`);
-    t.onclick = (e) => { if (e.target.closest('.more')) return; if (f.id !== S.floorId) selectFloor(f.id); };
-    t.ondblclick = () => { if (canEdit()) renameFloor(f); };
-    if ($('.more', t)) $('.more', t).onclick = (e) => {
-      e.stopPropagation();
-      const i = S.floors.indexOf(f);
-      dropdown(e.currentTarget, [
-        { label: '✎ เปลี่ยนชื่อชั้น', fn: () => renameFloor(f) },
-        { label: '↔ ตั้งสเกลแปลน', fn: () => { selectFloor(f.id).then(() => setTool('scale')); } },
-        { label: '🖼 เปลี่ยนรูปแปลน (คงตำแหน่งเดิม)', fn: () => replaceFloorImage(f) },
-        ...(i > 0 ? [{ label: '◀ ย้ายไปทางซ้าย', fn: () => moveFloor(f, -1) }] : []),
-        ...(i < S.floors.length - 1 ? [{ label: '▶ ย้ายไปทางขวา', fn: () => moveFloor(f, 1) }] : []),
-        '-',
-        { label: '🗑 ลบชั้นนี้', danger: true, fn: () => deleteFloor(f) },
-      ]);
-    };
-    box.appendChild(t);
-  }
-  if (!S.floors.length) box.appendChild(h('<span class="muted" style="font-size:13px;padding-left:4px">ยังไม่มีแปลน — กด “นำเข้าแปลนชั้น” เพื่อเริ่ม</span>'));
+  if (!S.floors.length) { box.appendChild(h('<span class="muted" style="font-size:13px;padding-left:4px">ยังไม่มีแปลน — กด “นำเข้าแปลนชั้น” เพื่อเริ่ม</span>')); return; }
+  const i = Math.max(0, S.floors.findIndex(f => f.id === S.floorId));
+  const f = S.floors[i];
+  const n = S.defects.filter(d => d.floorId === f.id).length;
+  const el = h(`<div class="fnav">
+    <button class="icon-btn fprev" title="ชั้นก่อนหน้า (Page Up)" ${i === 0 ? 'disabled' : ''}>◀</button>
+    <button class="fpick" title="เลือกชั้น / แปลน"><span class="fname">${esc(f.name)}</span><span class="cnt">${n} จุด</span><span class="fpos">${i + 1}/${S.floors.length}</span><span class="caret">▾</span></button>
+    <button class="icon-btn fnext" title="ชั้นถัดไป (Page Down)" ${i === S.floors.length - 1 ? 'disabled' : ''}>▶</button>
+    ${canEdit() ? '<button class="btn sm ghost fmenu" title="จัดการชั้นนี้">⋮ จัดการชั้น</button>' : ''}
+  </div>`);
+  $('.fprev', el).onclick = () => stepFloor(-1);
+  $('.fnext', el).onclick = () => stepFloor(1);
+  $('.fpick', el).onclick = (e) => floorPicker(e.currentTarget);
+  $('.fpick', el).ondblclick = () => { if (canEdit()) renameFloor(f); };
+  if ($('.fmenu', el)) $('.fmenu', el).onclick = (e) => dropdown(e.currentTarget, [
+    { label: '✎ เปลี่ยนชื่อชั้น', fn: () => renameFloor(f) },
+    { label: '↔ ตั้งสเกลแปลน', fn: () => setTool('scale') },
+    { label: '🖼 เปลี่ยนรูปแปลน (คงตำแหน่งเดิม)', fn: () => replaceFloorImage(f) },
+    ...(i > 0 ? [{ label: '↑ ย้ายลำดับขึ้น', fn: () => moveFloor(f, -1) }] : []),
+    ...(i < S.floors.length - 1 ? [{ label: '↓ ย้ายลำดับลง', fn: () => moveFloor(f, 1) }] : []),
+    '-',
+    { label: '🗑 ลบชั้นนี้', danger: true, fn: () => deleteFloor(f) },
+  ]);
+  box.appendChild(el);
+}
+
+function stepFloor(dir) {
+  const i = S.floors.findIndex(f => f.id === S.floorId) + dir;
+  if (i >= 0 && i < S.floors.length) selectFloor(S.floors[i].id);
+}
+
+function floorPicker(anchor) {
+  $$('.dropdown').forEach(d => d.remove());
+  const dd = h(`<div class="dropdown fpicker">
+    ${S.floors.length > 6 ? '<input class="inp" type="text" placeholder="ค้นหาชั้น…" style="margin-bottom:6px">' : ''}
+    <div class="flist"></div></div>`);
+  const list = $('.flist', dd);
+  const draw = (q = '') => {
+    list.innerHTML = '';
+    S.floors.forEach((f, i) => {
+      if (q && !f.name.toLowerCase().includes(q.toLowerCase())) return;
+      const n = S.defects.filter(d => d.floorId === f.id).length;
+      const b = h(`<button class="${f.id === S.floorId ? 'on' : ''}"><span class="fi">${i + 1}</span><span class="fn">${esc(f.name)}</span><span class="cnt">${n}</span></button>`);
+      b.onclick = () => { dd.remove(); if (f.id !== S.floorId) selectFloor(f.id); };
+      list.appendChild(b);
+    });
+    if (!list.children.length) list.appendChild(h('<div class="muted" style="padding:8px;font-size:13px">ไม่พบชั้นที่ค้นหา</div>'));
+  };
+  draw();
+  document.body.appendChild(dd);
+  const r = anchor.getBoundingClientRect();
+  dd.style.left = Math.max(8, Math.min(window.innerWidth - dd.offsetWidth - 8, r.left)) + 'px';
+  dd.style.top = (r.bottom + 4) + 'px';
+  const inp = $('input', dd);
+  if (inp) { inp.oninput = () => draw(inp.value); inp.onkeydown = (e) => { if (e.key === 'Enter') $('.flist button', dd)?.click(); if (e.key === 'Escape') dd.remove(); }; setTimeout(() => inp.focus(), 20); }
+  $('.flist button.on', dd)?.scrollIntoView({ block: 'nearest' });
+  setTimeout(() => {
+    const off = (e) => { if (!dd.contains(e.target)) { dd.remove(); document.removeEventListener('mousedown', off); } };
+    document.addEventListener('mousedown', off);
+  });
 }
 
 async function selectFloor(id, first = false) {
@@ -320,7 +358,7 @@ async function importFloors() {
     P().floorOrder = S.floors.map(x => x.id);
     await touch(P());
     m.close();
-    toast(`นำเข้าแปลนแล้ว ${S.floors.length} ชั้น — ดับเบิลคลิกที่แท็บเพื่อเปลี่ยนชื่อชั้น`, 'ok', 4000);
+    toast(`นำเข้าแปลนแล้ว ${S.floors.length} ชั้น — เปลี่ยนชื่อชั้นได้ที่ “⋮ จัดการชั้น”`, 'ok', 4000);
     await selectFloor(firstNew);
   } catch (e) {
     console.error(e); m.close(); toast('นำเข้าแปลนไม่สำเร็จ: ' + e.message, 'error', 5000);
@@ -765,7 +803,7 @@ function onKey(e) {
     select(null); return;
   }
   if (typing) return;
-  if (!canEdit() && !['f', 'l', '+', '=', '-', ' ', '['].includes(e.key.toLowerCase())) return;
+  if (!canEdit() && !['f', 'l', '+', '=', '-', ' ', '[', 'pageup', 'pagedown'].includes(e.key.toLowerCase())) return;
   if (e.key === ' ') { spaceDown = true; e.preventDefault(); window.addEventListener('keyup', (ev) => { if (ev.key === ' ') spaceDown = false; }, { once: true }); return; }
   if (S.draft?.kind === 'area') {
     if (e.key === 'Enter') { finishArea(); return; }
@@ -781,6 +819,8 @@ function onKey(e) {
   else if (k === 'c') { S.copyPrev = !S.copyPrev; renderTools(); }
   else if (k === 'l') { S.showLabels = !S.showLabels; renderTools(); renderPins(); }
   else if (k === '[') toggleLeft();
+  else if (e.key === 'PageUp') { e.preventDefault(); stepFloor(-1); }
+  else if (e.key === 'PageDown') { e.preventDefault(); stepFloor(1); }
   else if (k === 'f') fitView();
   else if (k === '+' || k === '=') zoomAt(1.25);
   else if (k === '-') zoomAt(0.8);
