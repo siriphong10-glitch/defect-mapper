@@ -17,6 +17,7 @@ export async function newProject(fields) {
     numbering: fields.numbering,          // 'auto' | 'manual'
     defaultType: fields.defaultType || 'structural',
     templates: saved ? JSON.parse(JSON.stringify(saved)) : defaultTemplates(),
+    testSettings: (await db.getMeta('defaultTestSettings', null)) || undefined,
     floorOrder: [],
     createdAt: Date.now(),
     updatedAt: Date.now(),
@@ -39,8 +40,11 @@ export async function loadBundle(projectId) {
     const ia = order.indexOf(a.id), ib = order.indexOf(b.id);
     return (ia < 0 ? 1e9 : ia) - (ib < 0 ? 1e9 : ib) || a.createdAt - b.createdAt;
   });
-  const defects = await db.byProject('defects', projectId);
-  return { project, floors, defects };
+  const all = await db.byProject('defects', projectId);
+  // test stations share the 'defects' store (layer: 'test') so they sync with the same backend
+  const defects = all.filter(d => d.layer !== 'test');
+  const tests = all.filter(d => d.layer === 'test');
+  return { project, floors, defects, tests };
 }
 
 // ---------- numbering ----------

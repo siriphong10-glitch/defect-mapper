@@ -5,6 +5,9 @@ import { loadBundle, touch, suggestNo, isDuplicateNo, renumberAll } from './proj
 import { TYPE_LABELS, fieldByRole, severityInfo, NO_SEVERITY_COLOR, textOn, defectTitle } from './templates.js';
 import { dropdown, projectDialog, editLogin } from './app.js';
 import * as sync from './sync.js';
+import { prefixFor, nextCode, stationLevel, levelColor, typeDef, settingsOf, allTypes } from './tests.js';
+import { buildTestPanel, stationChips, pickTypeSet, testSettingsEditor } from './test-panel.js';
+import './keypad.js';
 
 const ICON = {
   select: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M5 3l14 8-6 1.5L10 19z"/></svg>',
@@ -13,6 +16,9 @@ const ICON = {
   rect: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="6" width="16" height="12" rx="1" fill="currentColor" fill-opacity=".15"/></svg>',
   scale: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 15l12-12 6 6-12 12z"/><path d="M7 11l2 2M10 8l2 2M13 5l2 2"/></svg>',
   copy: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/></svg>',
+  check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8 12.5l2.8 2.8L16.5 9.5"/></svg>',
+  layers: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M12 3l9 5-9 5-9-5z"/><path d="M3 13l9 5 9-5" opacity=".6"/></svg>',
+  flask: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M9 3h6M10 3v6l-5.5 9.5A1.6 1.6 0 0 0 5.9 21h12.2a1.6 1.6 0 0 0 1.4-2.5L14 9V3"/><path d="M7.5 15h9"/></svg>',
   label: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="8"/><path d="M10 9h3v7"/></svg>',
 };
 const TOOL_HINT = {
@@ -24,6 +30,7 @@ const TOOL_HINT = {
 };
 
 let S = null; // workspace state
+window.__dm = { get S() { return S; } }; // for debugging/tests
 
 export async function openWorkspace(root, projectId) {
   if (sync.REMOTE) {
@@ -39,7 +46,9 @@ export async function openWorkspace(root, projectId) {
     root, ...b,
     floorId: null, selectedId: null, tool: 'select', copyPrev: false, showLabels: true,
     view: { tx: 0, ty: 0, s: 1 }, draft: null, img: null, imgUrl: null, lastCreatedId: null,
-    filter: '',
+    filter: '', mode: localStorage.getItem('dm_mode_' + projectId) === 'test' ? 'test' : 'defect',
+    showOther: localStorage.getItem('dm_show_other') !== '0',
+    confirm: localStorage.getItem('dm_confirm') !== '0', pending: null,
   };
   S.floorId = (b.floors[0] || {}).id || null;
   document.title = b.project.name + ' — Defect Mapper';
@@ -75,7 +84,7 @@ async function reloadFromLocal() {
   const b = await loadBundle(S.project.id);
   if (!b) return;
   const oldFloor = curFloor();
-  S.project = b.project; S.floors = b.floors; S.defects = b.defects;
+  S.project = b.project; S.floors = b.floors; S.defects = b.defects; S.tests = b.tests;
   if (S.selectedId && !selected()) S.selectedId = null;
   renderTitle();
   const nf = curFloor();
@@ -86,8 +95,11 @@ async function reloadFromLocal() {
 const P = () => S.project;
 const tplOf = (d) => P().templates[d.type] || P().templates.structural;
 const curFloor = () => S.floors.find(f => f.id === S.floorId) || null;
-const floorDefects = () => S.defects.filter(d => d.floorId === S.floorId);
-const selected = () => S.defects.find(d => d.id === S.selectedId) || null;
+const isTest = () => S.mode === 'test';
+const curItems = () => (isTest() ? S.tests : S.defects);
+const floorDefects = () => curItems().filter(d => d.floorId === S.floorId);
+const selected = () => curItems().find(d => d.id === S.selectedId) || null;
+const itemLabel = (d) => (d.layer === 'test' ? d.code : d.no);
 
 export function defectColor(project, d) {
   const tpl = project.templates[d.type] || project.templates.structural;
@@ -104,9 +116,10 @@ function renderShell() {
     <div class="ws-top">
       <button class="btn ghost" id="back" title="กลับหน้ารวมโครงการ">← โครงการทั้งหมด</button>
       <div class="title"><h2 id="pname"></h2><div class="sub" id="psub"></div></div>
+      <div class="mode-seg" id="modeSeg"><button data-mode="defect" class="${!isTest() ? 'on' : ''}">ความเสียหาย</button><button data-mode="test" class="${isTest() ? 'on' : ''}">ผลทดสอบ</button></div>
       <span data-sync></span>
       ${sync.REMOTE ? `<button class="btn ghost" id="btnAuth">${canEdit() ? '🔓 ออกโหมดแก้ไข' : '🔒 เข้าโหมดแก้ไข'}</button>` : ''}
-      <button class="btn edit-only" id="btnTpl" title="แก้ไขหัวข้อและตัวเลือกความเสียหาย">⚙ หัวข้อความเสียหาย</button>
+      <button class="btn edit-only" id="btnTpl" title="${isTest() ? 'ตั้งค่าการทดสอบและเกณฑ์ประเมิน' : 'แก้ไขหัวข้อและตัวเลือกความเสียหาย'}">${isTest() ? '⚙ การทดสอบและเกณฑ์' : '⚙ หัวข้อความเสียหาย'}</button>
       <button class="icon-btn" id="btnMore" title="เพิ่มเติม">⋯</button>
       <span class="exp-split"><button class="btn primary" id="btnExport" title="ส่งออกรายงาน">⤓ ส่งออก</button><button class="btn primary" id="btnExportMenu" title="เลือกรูปแบบไฟล์">▾</button></span>
     </div>
@@ -117,8 +130,8 @@ function renderShell() {
     <div class="ws-main">
       <aside class="ws-left ${localStorage.getItem('dm_left_collapsed') === '1' ? 'collapsed' : ''}" id="left">
         <button class="ltoggle" id="lToggle" title="ซ่อน/แสดงรายการความเสียหาย ( [ )"></button>
-        <div class="lhead"><h4><span>รายการในชั้นนี้</span><span class="muted" id="lcount"></span></h4>
-          <input class="inp" id="lfilter" type="text" placeholder="ค้นหาเลข / หัวข้อ"></div>
+        <div class="lhead"><h4><span>${isTest() ? 'จุดทดสอบในชั้นนี้' : 'รายการในชั้นนี้'}</span><span class="muted" id="lcount"></span></h4>
+          <input class="inp" id="lfilter" type="text" placeholder="${isTest() ? 'ค้นหารหัส / ชนิดการทดสอบ' : 'ค้นหาเลข / หัวข้อ'}"></div>
         <div class="dlist" id="dlist"></div>
       </aside>
       <div class="ws-canvas" id="canvas"></div>
@@ -129,15 +142,21 @@ function renderShell() {
   S.root.appendChild(el);
   $('#back').onclick = () => { location.hash = '#/'; };
   $('#btnImport').onclick = importFloors;
+  $$('[data-mode]').forEach(b => b.onclick = () => setMode(b.dataset.mode));
   $('#btnTpl').onclick = async () => {
+    if (isTest()) {
+      testSettingsEditor(P(), async () => { await touch(P()); refreshAll(); });
+      return;
+    }
     const { templateEditor } = await import('./tpl-editor.js');
     templateEditor(P(), async () => {
       await touch(P());
-      S.defects = await db.byProject('defects', P().id); // option renames may have updated pins
+      const nb = await loadBundle(P().id); S.defects = nb.defects; S.tests = nb.tests; // option renames may have updated pins
       refreshAll();
     });
   };
   const openExport = async (fmt) => {
+    if (fmt === 'tests' || (!fmt && isTest())) { const { exportTestsDialog } = await import('./test-export.js'); exportTestsDialog(S.project.id); return; }
     const { exportDialog } = await import('./export.js');
     if (!fmt) fmt = (await db.getMeta('exportPrefs', {})).lastFormat || 'word';
     exportDialog(S.project.id, fmt);
@@ -146,10 +165,13 @@ function renderShell() {
   $('#btnExportMenu').onclick = async (e) => {
     const anchor = e.currentTarget;
     const { EXPORT_FORMATS } = await import('./export.js');
-    dropdown(anchor, EXPORT_FORMATS.map(f => ({
+    dropdown(anchor, [...EXPORT_FORMATS.map(f => ({
       html: `<span class="fmt-ic" style="background:${f.color}">${f.icon}</span><span class="fmt-txt">${esc(f.label)}<small>${esc(f.desc)}</small></span>`,
       fn: () => openExport(f.id),
-    })));
+    })), '-', {
+      html: `<span class="fmt-ic" style="background:#0f766e">T</span><span class="fmt-txt">ผลทดสอบ (Word / CSV / Excel)<small>ตารางผลแยกตามชนิดการทดสอบ พร้อมเกณฑ์</small></span>`,
+      fn: () => openExport('tests'),
+    }]);
   };
   sync.renderStatus();
   if ($('#btnAuth')) $('#btnAuth').onclick = () => {
@@ -171,6 +193,15 @@ function renderShell() {
   setupCanvas();
   document.removeEventListener('keydown', onKey);
   document.addEventListener('keydown', onKey);
+}
+
+async function setMode(m) {
+  if (S.mode === m) return;
+  S.mode = m; S.selectedId = null; S.draft = null; S.tool = 'select'; S.filter = '';
+  try { localStorage.setItem('dm_mode_' + S.project.id, m); } catch { /* */ }
+  cancelPending();
+  renderShell();
+  await selectFloor(S.floorId);
 }
 
 function toggleLeft() {
@@ -204,7 +235,7 @@ function renderTabs() {
   if (!S.floors.length) { box.appendChild(h('<span class="muted" style="font-size:13px;padding-left:4px">ยังไม่มีแปลน — กด “นำเข้าแปลนชั้น” เพื่อเริ่ม</span>')); return; }
   const i = Math.max(0, S.floors.findIndex(f => f.id === S.floorId));
   const f = S.floors[i];
-  const n = S.defects.filter(d => d.floorId === f.id).length;
+  const n = curItems().filter(d => d.floorId === f.id).length;
   const el = h(`<div class="fnav">
     <button class="icon-btn fprev" title="ชั้นก่อนหน้า (Page Up)" ${i === 0 ? 'disabled' : ''}>◀</button>
     <button class="fpick" title="เลือกชั้น / แปลน"><span class="fname">${esc(f.name)}</span><span class="cnt">${n} จุด</span><span class="fpos">${i + 1}/${S.floors.length}</span><span class="caret">▾</span></button>
@@ -242,7 +273,7 @@ function floorPicker(anchor) {
     list.innerHTML = '';
     S.floors.forEach((f, i) => {
       if (q && !f.name.toLowerCase().includes(q.toLowerCase())) return;
-      const n = S.defects.filter(d => d.floorId === f.id).length;
+      const n = curItems().filter(d => d.floorId === f.id).length;
       const b = h(`<button class="${f.id === S.floorId ? 'on' : ''}"><span class="fi">${i + 1}</span><span class="fn">${esc(f.name)}</span><span class="cnt">${n}</span></button>`);
       b.onclick = () => { dd.remove(); if (f.id !== S.floorId) selectFloor(f.id); };
       list.appendChild(b);
@@ -296,13 +327,14 @@ async function moveFloor(f, dir) {
 }
 
 async function deleteFloor(f) {
-  const n = S.defects.filter(d => d.floorId === f.id).length;
-  if (!(await confirmBox(`ลบ “${f.name}” ${n ? `พร้อมจุดความเสียหาย ${n} จุด` : ''}? การลบไม่สามารถย้อนกลับได้`, { ok: 'ลบชั้น', danger: true }))) return;
-  for (const d of S.defects.filter(d => d.floorId === f.id)) {
+  const n = S.defects.filter(d => d.floorId === f.id).length, nt = S.tests.filter(d => d.floorId === f.id).length;
+  if (!(await confirmBox(`ลบ “${f.name}” ${n ? `พร้อมจุดความเสียหาย ${n} จุด` : ''}${nt ? ` และจุดทดสอบ ${nt} จุด` : ''}? การลบไม่สามารถย้อนกลับได้`, { ok: 'ลบชั้น', danger: true }))) return;
+  for (const d of [...S.defects, ...S.tests].filter(d => d.floorId === f.id)) {
     for (const ph of d.photoIds || []) { forgetUrl(ph); await db.delBlob(ph); }
     await db.del('defects', d.id);
   }
   S.defects = S.defects.filter(d => d.floorId !== f.id);
+  S.tests = S.tests.filter(d => d.floorId !== f.id);
   forgetUrl(f.blobId); await db.delBlob(f.blobId); await db.del('floors', f.id);
   S.floors = S.floors.filter(x => x.id !== f.id);
   P().floorOrder = S.floors.map(x => x.id);
@@ -372,7 +404,7 @@ async function replaceFloorImage(f) {
   const [im] = await fileToPlanImages(file);
   if (!im) return;
   const sx = im.w / f.w, sy = im.h / f.h;
-  for (const d of S.defects.filter(d => d.floorId === f.id)) {
+  for (const d of [...S.defects, ...S.tests].filter(d => d.floorId === f.id)) {
     d.pts = d.pts.map(([x, y]) => [x * sx, y * sy]);
     await db.put('defects', d);
   }
@@ -386,6 +418,7 @@ async function replaceFloorImage(f) {
 
 // ===================================================================== list
 function renderList() {
+  if (isTest()) return renderTestList();
   const box = $('#dlist');
   const all = floorDefects();
   $('#lcount').textContent = `${all.length} จุด`;
@@ -409,6 +442,28 @@ function renderList() {
   if (on) on.scrollIntoView({ block: 'nearest' });
 }
 
+function renderTestList() {
+  const box = $('#dlist');
+  const all = floorDefects();
+  $('#lcount').textContent = `${all.length} จุด`;
+  const q = S.filter.trim().toLowerCase();
+  const list = all.filter(d => !q || `${d.code} ${Object.keys(d.tests || {}).map(id => typeDef(P(), id)?.short).join(' ')} ${d.element || ''} ${d.place || ''}`.toLowerCase().includes(q))
+    .sort((a, b) => naturalCmp(a.code, b.code));
+  box.innerHTML = '';
+  for (const d of list) {
+    const lv = stationLevel(P(), d);
+    const meta = [d.element, d.place, d.role === 'baseline' ? 'จุดอ้างอิง' : d.role === 'targeted' ? 'จุดเจาะจง' : ''].filter(Boolean).join(' • ');
+    const it = h(`<div class="ditem ${d.id === S.selectedId ? 'on' : ''}">
+      <span class="badge tbadge" style="background:${levelColor(lv)};color:${lv === 'none' ? 'var(--ink)' : '#fff'}">◆</span>
+      <div class="txt"><div class="t1">${esc(d.code)}${meta ? ` <span class="t2" style="font-weight:400">${esc(meta)}</span>` : ''}</div><div class="tchips">${stationChips(P(), d)}</div></div></div>`);
+    it.onclick = () => { select(d.id); centerOn(d); };
+    box.appendChild(it);
+  }
+  if (!all.length) box.appendChild(h(`<div class="muted" style="font-size:13px;padding:10px">${S.floors.length ? 'ยังไม่มีจุดทดสอบในชั้นนี้ เลือกเครื่องมือ “ปักจุดทดสอบ” ด้านล่าง' : ''}</div>`));
+  const on = $('.ditem.on', box);
+  if (on) on.scrollIntoView({ block: 'nearest' });
+}
+
 // ===================================================================== tools
 function renderTools() {
   const bar = $('#tools');
@@ -426,13 +481,31 @@ function renderTools() {
     updateZoomLabel();
     return;
   }
-  bar.innerHTML = `
+  const common = `
+    <button class="tool ${S.confirm ? 'on' : ''}" id="tConfirm" title="ให้กดยืนยันก่อนปักทุกครั้ง (กันกดผิด)">${ICON.check}<span>ยืนยันก่อนปัก</span><kbd>K</kbd></button>
+    <button class="tool ${S.showOther ? 'on' : ''}" id="tOther" title="แสดงจุดของอีกชั้นข้อมูลแบบจาง ๆ">${ICON.layers}<span>${isTest() ? 'แสดงความเสียหาย' : 'แสดงจุดทดสอบ'}</span><kbd>O</kbd></button>`;
+  if (isTest()) {
+    const set = (settingsOf(P()).lastSet || []).map(id => typeDef(P(), id)?.short).filter(Boolean);
+    bar.innerHTML = `
+      ${tool('select', 'เลือก/เลื่อน', 'V')}
+      <span class="tsep"></span>
+      ${tool('point', 'ปักจุดทดสอบ', 'P')}
+      <button class="tool tset-btn" id="tSet" title="เลือกชนิดการทดสอบของจุดที่จะปัก">${ICON.flask}<span class="tset-lbl">${esc(set.join(' + ') || 'เลือกชนิด')} ▾</span><kbd>T</kbd></button>
+      <span class="tsep"></span>${common}
+      ${tool('scale', 'ตั้งสเกล', 'S')}
+      <button class="tool ${S.showLabels ? 'on' : ''}" id="tLabels" title="แสดง/ซ่อนรหัสบนแปลน">${ICON.label}<span>แสดงรหัส</span><kbd>L</kbd></button>
+      <span class="tsep"></span>
+      <button class="icon-btn" id="zOut" title="ซูมออก (−)">－</button><span class="zoom-val" id="zVal">100%</span><button class="icon-btn" id="zIn" title="ซูมเข้า (+)">＋</button>
+      <button class="btn sm ghost" id="zFit" title="พอดีหน้าจอ (F)">พอดีจอ</button>`;
+    $('#tSet').onclick = (e) => pickTypeSet(e.currentTarget, P(), () => { if (S.tool !== 'point') setTool('point'); else { renderTools(); updateHint(); } touch(P()); });
+  } else bar.innerHTML = `
     ${tool('select', 'เลือก/เลื่อน', 'V')}
     <span class="tsep"></span>
     ${tool('point', 'ปักจุด', 'P')}
     ${tool('area', 'พื้นที่', 'A')}
     ${tool('rect', 'สี่เหลี่ยม', 'R')}
     <span class="tsep"></span>
+    ${common}
     <button class="tool ${S.copyPrev ? 'on' : ''}" id="tCopy" title="เมื่อเปิด จุดใหม่จะคัดลอกรายละเอียด (ไม่รวมรูป) จากจุดล่าสุด">${ICON.copy}<span>ใช้รายละเอียดเดิม</span><kbd>C</kbd></button>
     ${tool('scale', 'ตั้งสเกล', 'S')}
     <button class="tool ${S.showLabels ? 'on' : ''}" id="tLabels" title="แสดง/ซ่อนเลขบนแปลน">${ICON.label}<span>แสดงเลข</span><kbd>L</kbd></button>
@@ -442,7 +515,9 @@ function renderTools() {
     <button class="icon-btn" id="zIn" title="ซูมเข้า (+)">＋</button>
     <button class="btn sm ghost" id="zFit" title="พอดีหน้าจอ (F)">พอดีจอ</button>`;
   $$('[data-tool]', bar).forEach(b => b.onclick = () => setTool(b.dataset.tool));
-  $('#tCopy').onclick = () => { S.copyPrev = !S.copyPrev; renderTools(); };
+  if ($('#tCopy')) $('#tCopy').onclick = () => { S.copyPrev = !S.copyPrev; renderTools(); };
+  $('#tConfirm').onclick = toggleConfirm;
+  $('#tOther').onclick = toggleOther;
   $('#tLabels').onclick = () => { S.showLabels = !S.showLabels; renderTools(); renderPins(); };
   $('#zIn').onclick = () => zoomAt(1.25);
   $('#zOut').onclick = () => zoomAt(0.8);
@@ -450,8 +525,13 @@ function renderTools() {
   updateZoomLabel();
 }
 
+function toggleConfirm() { S.confirm = !S.confirm; try { localStorage.setItem('dm_confirm', S.confirm ? '1' : '0'); } catch { /* */ } renderTools(); toast(S.confirm ? 'เปิด: ต้องกดยืนยันก่อนปักทุกครั้ง' : 'ปิด: ปักทันทีเมื่อคลิก'); }
+function toggleOther() { S.showOther = !S.showOther; try { localStorage.setItem('dm_show_other', S.showOther ? '1' : '0'); } catch { /* */ } renderTools(); renderPins(); }
+
 function setTool(t) {
   if (!canEdit()) t = 'select';
+  if (isTest() && (t === 'area' || t === 'rect')) t = 'point';
+  cancelPending();
   S.tool = t;
   S.draft = null;
   renderTools();
@@ -466,7 +546,11 @@ function updateHint() {
   if (!hint) return;
   if (!S.img || S.tool === 'select') { hint.style.display = 'none'; return; }
   let t = TOOL_HINT[S.tool];
-  if (['point', 'area', 'rect'].includes(S.tool)) t += `  •  เลขถัดไป: ${suggestNo(P(), S.defects)}`;
+  if (isTest() && S.tool === 'point') {
+    const ids = settingsOf(P()).lastSet || [];
+    t = `คลิกบนแปลนเพื่อปักจุดทดสอบ (${ids.map(id => typeDef(P(), id)?.short).filter(Boolean).join(' + ')})  •  รหัสถัดไป: ${nextCode(P(), S.tests, prefixFor(P(), ids))}`;
+  } else if (['point', 'area', 'rect'].includes(S.tool)) t += `  •  เลขถัดไป: ${suggestNo(P(), S.defects)}`;
+  if (S.confirm && ['point', 'area', 'rect'].includes(S.tool)) t += '  •  ต้องกดยืนยันก่อนปัก';
   hint.textContent = t;
   hint.style.display = '';
 }
@@ -584,15 +668,44 @@ function renderPins() {
   $('#draft').innerHTML = '';
   if (!S.img) return;
   const k = 1 / S.view.s;
+  if (S.showOther) {
+    const other = (isTest() ? S.defects : S.tests).filter(d => d.floorId === S.floorId);
+    const og = svgEl('g', { opacity: 0.35, style: 'pointer-events:none' }, layer);
+    if (isTest()) drawDefects(og, other, k, false); else drawTests(og, other, k, false);
+  }
   const list = floorDefects().sort((a, b) => (a.id === S.selectedId) - (b.id === S.selectedId));
+  if (isTest()) drawTests(layer, list, k, true); else drawDefects(layer, list, k, true);
+  renderDraft();
+}
+
+function drawTests(layer, list, k, interactive) {
+  for (const d of list) {
+    const [x, y] = d.pts[0];
+    const lv = stationLevel(P(), d);
+    const col = levelColor(lv);
+    const sel = interactive && d.id === S.selectedId;
+    const g = svgEl('g', interactive ? { 'data-id': d.id, style: 'cursor:pointer' } : {}, layer);
+    const r = 9 * k;
+    if (sel) svgEl('rect', { x: x - r - 5 * k, y: y - r - 5 * k, width: 2 * r + 10 * k, height: 2 * r + 10 * k, transform: `rotate(45 ${x} ${y})`, fill: 'none', stroke: '#1f3a5f', 'stroke-width': 2.5 * k }, g);
+    svgEl('rect', { x: x - r, y: y - r, width: 2 * r, height: 2 * r, transform: `rotate(45 ${x} ${y})`, fill: col, stroke: lv === 'none' ? '#1f3a5f' : '#fff', 'stroke-width': 2 * k, style: 'filter:drop-shadow(0 1px 1.5px rgba(0,0,0,.45))' }, g);
+    if (S.showLabels) {
+      const fs = 11 * k, tw = (String(d.code).length * 6.6 + 10) * k, th = 17 * k, lx = x + 13 * k, ly = y - 22 * k;
+      svgEl('rect', { x: lx, y: ly, width: tw, height: th, rx: 4 * k, fill: '#fff', stroke: col === '#ffffff' ? '#1f3a5f' : col, 'stroke-width': 1.5 * k }, g);
+      const t = svgEl('text', { x: lx + tw / 2, y: ly + th * 0.7, 'text-anchor': 'middle', 'font-size': fs, 'font-weight': 700, fill: '#16202c', 'font-family': 'Sarabun, sans-serif' }, g);
+      t.textContent = d.code;
+    }
+  }
+}
+
+function drawDefects(layer, list, k, interactive) {
   // areas first, then points on top
   for (const pass of ['area', 'point']) {
     for (const d of list) {
       const isPt = d.shape === 'point';
       if ((pass === 'point') !== isPt) continue;
       const col = defectColor(P(), d);
-      const sel = d.id === S.selectedId;
-      const g = svgEl('g', { 'data-id': d.id, style: 'cursor:pointer' }, layer);
+      const sel = interactive && d.id === S.selectedId;
+      const g = svgEl('g', interactive ? { 'data-id': d.id, style: 'cursor:pointer' } : {}, layer);
       if (isPt) {
         const [x, y] = d.pts[0];
         badge(g, x, y, d.no, col, k, false, sel);
@@ -607,16 +720,24 @@ function renderPins() {
       }
     }
   }
-  renderDraft();
 }
 
 function renderDraft() {
   const g = $('#draft');
   g.innerHTML = '';
-  const dr = S.draft;
-  if (!dr) return;
   const k = 1 / S.view.s;
   const col = '#ff5a4e';
+  if (S.pending) {
+    const pts = S.pending.pts;
+    if (pts.length === 1) {
+      const [x, y] = pts[0];
+      svgEl('circle', { cx: x, cy: y, r: 16 * k, fill: col, 'fill-opacity': .18, stroke: col, 'stroke-width': 2 * k, 'stroke-dasharray': `${4 * k} ${3 * k}` }, g);
+      svgEl('path', { d: `M${x - 10 * k} ${y}H${x + 10 * k}M${x} ${y - 10 * k}V${y + 10 * k}`, stroke: col, 'stroke-width': 2 * k }, g);
+    } else svgEl('polygon', { points: pts.map(p => p.join(',')).join(' '), fill: col, 'fill-opacity': .2, stroke: col, 'stroke-width': 2.5 * k, 'stroke-dasharray': `${6 * k} ${4 * k}` }, g);
+    positionConfirm();
+  }
+  const dr = S.draft;
+  if (!dr) return;
   if (dr.kind === 'area' && dr.pts.length) {
     const pts = dr.hover ? [...dr.pts, dr.hover] : dr.pts;
     svgEl('polyline', { points: pts.map(p => p.join(',')).join(' '), fill: col, 'fill-opacity': .15, stroke: col, 'stroke-width': 2 * k, 'stroke-dasharray': `${6 * k} ${4 * k}` }, g);
@@ -652,7 +773,8 @@ function onDown(e) {
   if (e.button === 1 || e.button === 2 || spaceDown) { gesture = { type: 'pan', ...base }; return; }
   if (S.tool === 'select' && target && !canEdit()) { gesture = { type: 'pan', clickTarget: target, ...base }; return; }
   if (S.tool === 'select' && target) {
-    const d = S.defects.find(x => x.id === target.dataset.id);
+    const d = curItems().find(x => x.id === target.dataset.id);
+    if (!d) { gesture = { type: 'pan', ...base }; return; }
     if (target.dataset.vertex != null) gesture = { type: 'vertex', d, vi: +target.dataset.vertex, orig: d.pts.map(p => [...p]), ...base };
     else gesture = { type: 'move', d, orig: d.pts.map(p => [...p]), ...base };
     return;
@@ -725,18 +847,20 @@ async function onUp(e) {
   if (g.type === 'rect') {
     const dr = S.draft; S.draft = null;
     if (dr?.a && dr?.b && Math.abs(dr.a[0] - dr.b[0]) * S.view.s > 6 && Math.abs(dr.a[1] - dr.b[1]) * S.view.s > 6) {
-      await createDefect('rect', rectPts(dr.a, dr.b));
+      await place('rect', rectPts(dr.a, dr.b));
     } else renderPins();
     return;
   }
   if (g.type === 'pan' && !g.moved) {
+    if (S.pending && S.pending.pts.length > 1) return; // waiting for confirmation of an area
     const p = clampPt(w.x, w.y);
     const inside = w.x >= 0 && w.y >= 0 && w.x <= S.img.w && w.y <= S.img.h;
     if (S.tool === 'select') {
       if (g.clickTarget) select(g.clickTarget.dataset.id); else select(null);
     } else if (S.tool === 'point') {
-      if (g.clickTarget && !inside) return;
-      if (inside) await createDefect('point', [p]);
+      if (!inside) return;
+      if (S.pending && S.pending.pts.length === 1) { S.pending.pts = [p]; renderDraft(); return; } // adjust before confirming
+      await place('point', [p]);
     } else if (S.tool === 'area') {
       if (!inside) return;
       if (!S.draft) S.draft = { kind: 'area', pts: [] };
@@ -764,7 +888,7 @@ async function finishArea(fromDbl = false) {
   if (fromDbl) pts = pts.filter((p, i) => i === 0 || Math.hypot(p[0] - pts[i - 1][0], p[1] - pts[i - 1][1]) * S.view.s > 3);
   S.draft = null;
   if (pts.length < 3) { renderPins(); return; }
-  await createDefect('area', pts);
+  await place('area', pts);
 }
 
 async function finishScale() {
@@ -796,6 +920,10 @@ function onKey(e) {
   if (!S || !document.body.contains($('#canvas'))) { document.removeEventListener('keydown', onKey); return; }
   if (document.querySelector('.modal-back, .report-view')) return;
   const typing = /INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName) || document.activeElement?.isContentEditable;
+  if (S.pending && !typing) {
+    if (e.key === 'Enter') { e.preventDefault(); S.pending.resolve(true); return; }
+    if (e.key === 'Escape') { S.pending.resolve(false); return; }
+  }
   if (e.key === 'Escape') {
     if (typing) { document.activeElement.blur(); return; }
     if (S.draft) { S.draft = null; renderPins(); return; }
@@ -811,12 +939,15 @@ function onKey(e) {
   }
   const k = e.key.toLowerCase();
   if (e.ctrlKey || e.metaKey || e.altKey) return;
-  if (k === 'v') setTool('select');
+  if (k === 'k') toggleConfirm();
+  else if (k === 'o') toggleOther();
+  else if (k === 't' && isTest()) $('#tSet')?.click();
+  else if (k === 'v') setTool('select');
   else if (k === 'p') setTool('point');
   else if (k === 'a') setTool('area');
   else if (k === 'r') setTool('rect');
   else if (k === 's') setTool('scale');
-  else if (k === 'c') { S.copyPrev = !S.copyPrev; renderTools(); }
+  else if (k === 'c' && !isTest()) { S.copyPrev = !S.copyPrev; renderTools(); }
   else if (k === 'l') { S.showLabels = !S.showLabels; renderTools(); renderPins(); }
   else if (k === '[') toggleLeft();
   else if (e.key === 'PageUp') { e.preventDefault(); stepFloor(-1); }
@@ -835,6 +966,55 @@ function centerOn(d) {
   S.view.ty = c.clientHeight / 2 - y * S.view.s;
   S.userMoved = true;
   applyView(); renderPins();
+}
+
+// ===================================================================== placing (with optional confirmation)
+function cancelPending() { if (S?.pending) S.pending.resolve(false); }
+function positionConfirm() {
+  const box = $('#placeConfirm');
+  if (!box || !S.pending) return;
+  const pts = S.pending.pts;
+  const [x, y] = pts.length === 1 ? pts[0] : centroid(pts);
+  const c = $('#canvas');
+  let sx = x * S.view.s + S.view.tx, sy = y * S.view.s + S.view.ty;
+  sx = Math.max(110, Math.min(c.clientWidth - 110, sx)); sy = Math.max(10, Math.min(c.clientHeight - 70, sy + 26));
+  box.style.left = sx + 'px'; box.style.top = sy + 'px';
+}
+function confirmPlace(pts) {
+  if (!S.confirm) return Promise.resolve(pts);
+  cancelPending();
+  return new Promise((resolve) => {
+    const box = h(`<div class="place-confirm" id="placeConfirm"><span>${isTest() ? 'ปักจุดทดสอบตรงนี้?' : 'ปักตำแหน่งตรงนี้?'}</span>
+      <button class="btn sm primary" data-ok>✓ ยืนยัน</button><button class="btn sm" data-no>✕</button></div>`);
+    $('#canvas').appendChild(box);
+    const done = (v) => { if (!S.pending) return; const final = S.pending.pts; S.pending = null; box.remove(); renderDraft(); resolve(v ? final : null); };
+    S.pending = { pts, resolve: done };
+    $('[data-ok]', box).onclick = () => done(true);
+    $('[data-no]', box).onclick = () => done(false);
+    box.addEventListener('pointerdown', (e) => e.stopPropagation());
+    renderDraft();
+  });
+}
+async function place(shape, pts) {
+  if (!canEdit()) return;
+  const ok = await confirmPlace(pts);
+  if (!ok) { renderPins(); return; }
+  pts = ok; // the point may have been moved before confirming
+  if (isTest()) await createTest(pts.length === 1 ? pts : [centroid(pts)]);
+  else await createDefect(shape, pts);
+}
+
+async function createTest(pts) {
+  const p = P();
+  const ids = (settingsOf(p).lastSet || ['ferro', 'upv', 'rebound']).filter(id => typeDef(p, id));
+  const tests = {}; ids.forEach(id => { tests[id] = {}; });
+  const d = { id: uid(), projectId: p.id, floorId: S.floorId, layer: 'test', shape: 'point', pts,
+    code: nextCode(p, S.tests, prefixFor(p, ids)), role: '', element: '', place: '', tests, photoIds: [], createdAt: Date.now() };
+  await db.put('defects', d);
+  S.tests.push(d);
+  await touch(p);
+  S.selectedId = d.id;
+  renderTabs(); renderList(); renderPins(); renderRight(); updateHint();
 }
 
 // ===================================================================== defects
@@ -864,10 +1044,11 @@ function select(id) {
 
 async function deleteDefect(d) {
   if (!canEdit()) return;
-  if (!(await confirmBox(`ลบจุดที่ ${d.no}?`, { ok: 'ลบ', danger: true }))) return;
+  if (!(await confirmBox(d.layer === 'test' ? `ลบจุดทดสอบ ${d.code} พร้อมค่าที่บันทึกไว้?` : `ลบจุดที่ ${d.no}?`, { ok: 'ลบ', danger: true }))) return;
   for (const ph of d.photoIds || []) { forgetUrl(ph); await db.delBlob(ph); }
   await db.del('defects', d.id);
   S.defects = S.defects.filter(x => x.id !== d.id);
+  S.tests = S.tests.filter(x => x.id !== d.id);
   if (S.selectedId === d.id) S.selectedId = null;
   await touch(P());
   renderTabs(); renderList(); renderPins(); renderRight(); updateHint();
@@ -892,6 +1073,19 @@ function renderRight(keepScroll = false) {
   if (!d) { box.classList.add('closed'); box.innerHTML = ''; return; }
   const scroll = keepScroll ? $('.rbody', box)?.scrollTop : 0;
   box.classList.remove('closed');
+  if (d.layer === 'test') {
+    box.innerHTML = '';
+    buildTestPanel(box, {
+      project: P(), station: d, floor: S.floors.find(f => f.id === d.floorId), editable: canEdit(), stations: S.tests,
+      onSave: async (st) => { if (!canEdit()) return; await db.put('defects', st); touch(P()); },
+      onDelete: (st) => deleteDefect(st),
+      onClose: () => select(null),
+      onCodeChange: () => { renderList(); renderPins(); updateHint(); },
+    });
+    renderPhotos(d);
+    if (scroll) $('.rbody', box).scrollTop = scroll;
+    return;
+  }
   const p = P();
   const tpl = tplOf(d);
   const floor = S.floors.find(f => f.id === d.floorId);

@@ -889,7 +889,7 @@ export async function exportPack(projectId, prog = () => {}, popts = {}) {
     await loadScript('vendor/jszip.min.js');
     const model = await buildModel(projectId);
     const { project: p, floors } = model;
-    const { defects } = await loadBundle(projectId);
+    const defects = await db.byProject('defects', projectId); // raw: includes test stations
     const zip = new JSZip();
     const ext = (b) => (b?.type === 'image/png' ? 'png' : 'jpg');
     const safeNo = (no) => String(no).replace(/[^\w฀-๿-]+/g, '_');
@@ -913,6 +913,14 @@ export async function exportPack(projectId, prog = () => {}, popts = {}) {
         if (b) { const path = `photos/P${safeNo(it.no)}_${j + 1}.${ext(b)}`; zip.file(path, b); blobsMap[id] = path; }
       }
     }
+    const stations = defects.filter(d => d.layer === 'test');
+    for (const st of po.photos ? stations : []) {
+      for (let j = 0; j < (st.photoIds || []).length; j++) {
+        const id = st.photoIds[j];
+        const b = await db.getBlob(id);
+        if (b) { const path = `photos/T_${safeNo(st.code)}_${j + 1}.${ext(b)}`; zip.file(path, b); blobsMap[id] = path; }
+      }
+    }
     zip.file('project.json', JSON.stringify({ format: PACK_FORMAT, version: 1, exportedAt: new Date().toISOString(), project: p, floors, defects, blobs: blobsMap }, null, 2));
 
     // human/AI-readable report data
@@ -933,6 +941,11 @@ export async function exportPack(projectId, prog = () => {}, popts = {}) {
         };
       }),
     };
+    if (stations.length) {
+      const { testsReport } = await import('./test-export.js');
+      report.tests = testsReport(p, floors, stations);
+      report.totals.testPoints = stations.length;
+    }
     zip.file('report.json', JSON.stringify(report, null, 2));
     zip.file('README.md', packReadme(model));
     prog('กำลังบีบอัด', 0.9);
@@ -970,6 +983,7 @@ function packReadme(model) {
 3. ระดับความเสียหาย (\`severity\`) และความเร่งด่วน (\`urgency\`) ใช้จัดลำดับความสำคัญของงานซ่อม
 4. ช่อง \`fields\` ของแต่ละจุดเก็บข้อมูลตามแบบฟอร์มจริง (เช่น รายละเอียดความเสียหาย, ผลกระทบต่อความมั่นคง/ความคงทน, รายละเอียดการแก้ไข)
 5. \`areaFromPlan_m2\` คำนวณจากพื้นที่ที่วาดบนแปลนตามสเกลที่ตั้งไว้ (เป็นค่าประมาณ)
+6. \`tests\` (ถ้ามี) คือผลการทดสอบแยกตามชนิด: \`columns\`/\`rows\` ใช้ทำตารางผลบทที่ 3, \`criteria\` และ \`bands\` คือเกณฑ์ที่ใช้ประเมิน (ปรับได้ในแอพ), คอลัมน์ "หมายเหตุที่ต้องเขียน" บอกรหัสข้อควรระวังตามคลังวิธีทดสอบ (เช่น U1, U4, H1) ; รูปของจุดทดสอบอยู่ใน \`photos/T_<รหัสจุด>_*\`
 
 ## สรุปตามหัวข้อ
 | ลำดับ | โครงสร้าง/หมวด | หัวข้อ | ระดับสูงสุด | จำนวน | จุดที่ |
