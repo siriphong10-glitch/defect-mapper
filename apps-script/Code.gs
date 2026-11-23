@@ -1,5 +1,5 @@
 /**
- * Defect Mapper — ส่วนเก็บข้อมูลกลางบน Google Drive
+ * Inspect Recorder — ส่วนเก็บข้อมูลกลางบน Google Drive
  *
  * วิธีติดตั้ง (ทำครั้งเดียว) ดูรายละเอียดใน apps-script/README.md
  *   1) แก้ค่า EDIT_KEY ด้านล่างเป็นรหัสสำหรับแก้ไขข้อมูล

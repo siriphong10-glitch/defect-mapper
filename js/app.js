@@ -41,7 +41,7 @@ window.addEventListener('hashchange', route);
 // ---------------- home ----------------
 let lastPull = 0, remoteCounts = {}, homeTimer = null;
 async function renderHome(fromPull = false) {
-  document.title = 'Defect Mapper — โครงการทั้งหมด';
+  document.title = 'Inspect Recorder — โครงการทั้งหมด';
   const editable = sync.canEdit();
   const projects = (await db.all('projects')).sort((a, b) => b.updatedAt - a.updatedAt);
   const floors = await db.all('floors');
@@ -55,7 +55,7 @@ async function renderHome(fromPull = false) {
   app.innerHTML = '';
   const page = h(`<div>
     <div class="home-top"><div class="inner">
-      <div class="brand"><div class="logo">${PIN_LOGO}</div><div><h1>Defect Mapper</h1><p>ระบบปักตำแหน่งความเสียหาย-ข้อบกพร่องบนแบบแปลน</p></div></div>
+      <div class="brand"><div class="logo">${PIN_LOGO}</div><div><h1>Inspect Recorder</h1><p>บันทึกความเสียหายและผลทดสอบบนแบบแปลน</p></div></div>
       <div class="spacer"></div>
       <span data-sync></span>
       ${sync.REMOTE ? `<button class="btn" id="btnAuth">${editable ? '🔓 ออกจากโหมดแก้ไข' : '🔒 เข้าโหมดแก้ไข'}</button>` : ''}

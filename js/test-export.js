@@ -296,7 +296,7 @@ async function exportWordTables(model, opts, prog) {
   }
   prog('กำลังรวมไฟล์ Word', 0.97);
   const doc = new D.Document({
-    creator: opts.org || 'Defect Mapper', title: `ผลการทดสอบ ${p.name}`,
+    creator: opts.org || 'Inspect Recorder', title: `ผลการทดสอบ ${p.name}`,
     styles: { default: { document: { run: { font: FONTS, size: 28, sizeComplexScript: 28 } } },
       paragraphStyles: [{ id: 'Heading1', name: 'Heading 1', basedOn: 'Normal', next: 'Normal', quickFormat: true, run: { font: FONTS, size: 34, sizeComplexScript: 34, bold: true, boldComplexScript: true, color: '1F3A5F' } }] },
     sections: sections.map(({ _type, ...s }) => s),

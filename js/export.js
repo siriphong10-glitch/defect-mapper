@@ -764,7 +764,7 @@ async function exportWord(projectId, opts, prog = () => {}) {
 
   prog('กำลังรวมไฟล์ Word', 0.97);
   const doc = new D.Document({
-    creator: opts.org || 'Defect Mapper', title: `รายการความเสียหาย-ข้อบกพร่อง ${p.name}`,
+    creator: opts.org || 'Inspect Recorder', title: `รายการความเสียหาย-ข้อบกพร่อง ${p.name}`,
     styles: {
       default: { document: { run: { font: FONTS, size: 28, sizeComplexScript: 28 } } },
       paragraphStyles: [
@@ -1104,7 +1104,7 @@ function packReadme(model) {
   const p = model.project;
   return `# แพ็กข้อมูลความเสียหาย-ข้อบกพร่อง: ${p.name}
 
-ส่งออกจาก Defect Mapper เมื่อ ${new Date().toLocaleString('th-TH')}
+ส่งออกจาก Inspect Recorder เมื่อ ${new Date().toLocaleString('th-TH')}
 
 ## ภาพรวม
 - รหัสงาน: ${p.code || '-'}
@@ -1120,7 +1120,7 @@ function packReadme(model) {
 | \`plans/annotated/\` | แปลนแต่ละชั้นที่ปักตำแหน่งแล้ว (เลขบนหมุด = เลขลำดับจุด, สีตามระดับความเสียหาย) |
 | \`plans/original/\` | แปลนต้นฉบับที่ยังไม่ปัก |
 | \`photos/\` | รูปประกอบ ตั้งชื่อเป็น \`P<เลขจุด>_<ลำดับรูป>\` |
-| \`project.json\` | ข้อมูลดิบสำหรับนำเข้ากลับเข้า Defect Mapper (หน้าแรก → “นำเข้าโครงการ”) |
+| \`project.json\` | ข้อมูลดิบสำหรับนำเข้ากลับเข้า Inspect Recorder (หน้าแรก → “นำเข้าโครงการ”) |
 
 ## สำหรับ Claude: แนวทางใช้แพ็กนี้เขียนรายงาน
 1. อ่าน \`report.json\` ก่อน — \`groups\` คือหัวข้อความเสียหายที่ไม่ซ้ำกัน (ใช้เป็นหัวข้อย่อยในบทผลการตรวจสอบ) ส่วน \`defects\` คือรายละเอียดรายจุด
@@ -1149,7 +1149,7 @@ export async function importPack(file) {
   const pj = zip.file('project.json');
   if (!pj) throw new Error('ไม่พบ project.json ในไฟล์ zip');
   const data = JSON.parse(await pj.async('string'));
-  if (data.format !== PACK_FORMAT) throw new Error('ไฟล์นี้ไม่ใช่แพ็กข้อมูลของ Defect Mapper');
+  if (data.format !== PACK_FORMAT) throw new Error('ไฟล์นี้ไม่ใช่แพ็กข้อมูลของ Inspect Recorder');
   const mime = (path) => (/\.png$/i.test(path) ? 'image/png' : /\.pdf$/i.test(path) ? 'application/pdf' : 'image/jpeg');
   const newBlob = {};
   const blobFor = async (oldId) => {

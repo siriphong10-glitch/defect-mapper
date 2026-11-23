@@ -53,7 +53,7 @@ export async function openWorkspace(root, projectId) {
   };
   S.floorId = (b.floors[0] || {}).id || null;
   ensureCodes(b.project, S.tests);
-  document.title = b.project.name + ' — Defect Mapper';
+  document.title = b.project.name + ' — Inspect Recorder';
   renderShell();
   await selectFloor(S.floorId, true);
   if (S.mode === 'overview') renderDash();
