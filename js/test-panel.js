@@ -1,7 +1,7 @@
 // Right-hand panel for a test station, list rendering helpers and the criteria editor.
 import { $, $$, esc, h, modal, confirmBox, toast, debounce, download, pickFiles } from './utils.js';
 import { db } from './db.js';
-import { LEVEL, ELEMENTS, ROLES, allTypes, typeDef, evalTest, stationLevel, levelColor, settingsOf, BUILTIN, PRESETS } from './tests.js';
+import { LEVEL, ELEMENTS, ROLES, allTypes, typeDef, evalTest, stationLevel, levelColor, settingsOf, BUILTIN, PRESETS, codeOf, allCodes, nextCode, typePrefix } from './tests.js';
 import { keypadEnabled, setKeypad, applyMode } from './keypad.js';
 
 const cssLevel = (l) => `background:${levelColor(l)};color:${l === 'none' ? 'var(--ink-3)' : '#fff'};${l === 'none' ? 'border:1px solid var(--line)' : ''}`;
@@ -15,7 +15,7 @@ export function stationChips(project, st) {
   return Object.keys(st.tests || {}).map(id => {
     const t = typeDef(project, id); if (!t) return '';
     const e = evalTest(project, st, id);
-    return chip(e.level || 'none', t.short + (e.grade ? ' · ' + e.grade.replace(/\s*\(.*\)$/, '') : e.recorded ? '' : ' · —'));
+    return chip(e.level || 'none', codeOf(st, id) + ' ' + t.short + (e.grade ? ' · ' + e.grade.replace(/\s*\(.*\)$/, '') : e.recorded ? '' : ' · —'));
   }).join('');
 }
 
@@ -28,9 +28,7 @@ export function buildTestPanel(box, ctx) {
   const el = h(`<div style="display:contents">
     <div class="rhead"><h4>จุดทดสอบ</h4><button class="icon-btn" id="rClose" title="ปิด (Esc)">✕</button></div>
     <div class="rbody" data-kp-scope>
-      <div class="fld" id="codeWrap"><span>รหัสจุดทดสอบ</span>
-        <div class="num-input"><input type="text" id="fCode" value="${esc(st.code)}"><span class="hint">${esc(ctx.floor?.name || '')}</span></div>
-        <span class="err" id="codeErr"></span></div>
+      <div class="hint" style="margin:-4px 0 10px">${esc(ctx.floor?.name || '')} • แต่ละการทดสอบมีรหัสของตัวเอง แก้ได้ที่หัวการ์ด</div>
       <div class="fld"><span>ประเภทจุด</span><div class="seg" id="roleSeg">${Object.entries(ROLES).map(([k, v]) => `<button data-role="${k}" class="${(st.role || '') === k ? 'on' : ''}">${v}</button>`).join('')}</div></div>
       <div class="row">
         <label class="fld"><span>ชิ้นส่วน</span><select id="fEl"><option value="">— เลือก —</option>${ELEMENTS.map(x => `<option ${x === st.element ? 'selected' : ''}>${x}</option>`).join('')}${st.element && !ELEMENTS.includes(st.element) ? `<option selected>${esc(st.element)}</option>` : ''}</select></label>
@@ -55,16 +53,8 @@ export function buildTestPanel(box, ctx) {
   $('#rDel', box).onclick = () => ctx.onDelete(st);
   $('#kpToggle', box).onclick = (e) => { setKeypad(!keypadEnabled()); e.currentTarget.textContent = keypadEnabled() ? '⌨ ใช้คีย์บอร์ดเครื่อง' : '🔢 ใช้แป้นตัวเลขบนจอ'; };
 
-  // code (unique)
-  const codeIn = $('#fCode', box);
-  codeIn.oninput = () => {
-    const v = codeIn.value.trim();
-    const dup = ctx.stations.some(s => s.id !== st.id && String(s.code).trim().toLowerCase() === v.toLowerCase());
-    const err = !v ? 'กรุณาใส่รหัส' : dup ? `รหัส “${v}” ซ้ำกับจุดอื่นแล้ว` : '';
-    $('#codeErr', box).textContent = err; $('#codeWrap', box).classList.toggle('invalid', !!err);
-    if (!err) { st.code = v; save(); ctx.onCodeChange(); }
-  };
-  codeIn.onblur = () => { if ($('#codeErr', box).textContent) { codeIn.value = st.code; $('#codeErr', box).textContent = ''; $('#codeWrap', box).classList.remove('invalid'); } };
+  st.codes ||= {};
+  const syncPrimary = () => { const ids = Object.keys(st.tests); st.code = ids.length ? (st.codes[ids[0]] || st.code) : st.code; };
   $$('[data-role]', box).forEach(b => b.onclick = () => { if (!editable) return; st.role = b.dataset.role; $$('[data-role]', box).forEach(x => x.classList.toggle('on', x === b)); save(); ctx.onCodeChange(); });
   $('#fEl', box).onchange = (e) => { st.element = e.target.value; save(); ctx.onCodeChange(); };
   $('#fDate', box).onchange = (e) => { st.date = e.target.value; save(); };
@@ -92,16 +82,26 @@ export function buildTestPanel(box, ctx) {
       if (!t) continue;
       const v = st.tests[id];
       const card = h(`<div class="tcard" data-id="${id}">
-        <div class="thd"><b>${esc(t.short)}</b><span class="tstat"></span><span class="spacer"></span>
+        <div class="thd"><input class="tcode" type="text" value="${esc(st.codes[id] || st.code)}" title="รหัสของการทดสอบนี้ (ไม่ซ้ำในโครงการ)"><b>${esc(t.short)}</b><span class="tstat"></span><span class="spacer"></span>
           <button class="icon-btn edit-only" data-rm title="ลบการทดสอบนี้ออกจากจุด">✕</button></div>
+        <div class="err tcode-err"></div>
         ${t.locationFirst ? '<div class="hint" style="margin:-2px 0 6px">ปักตำแหน่งไว้ก่อน บันทึกค่าภายหลังได้</div>' : ''}
         <div class="tfields"></div><div class="tres"></div></div>`);
+      const ci = $('.tcode', card);
+      ci.oninput = () => {
+        const val = ci.value.trim();
+        const others = allCodes(ctx.stations.filter(s => s.id !== st.id)).concat(Object.entries(st.codes).filter(([k]) => k !== id).map(([, c]) => String(c).toLowerCase()));
+        const err = !val ? 'กรุณาใส่รหัส' : others.includes(val.toLowerCase()) ? `รหัส “${val}” ซ้ำกับจุดอื่นแล้ว` : '';
+        $('.tcode-err', card).textContent = err; ci.classList.toggle('bad', !!err);
+        if (!err) { st.codes[id] = val; syncPrimary(); save(); ctx.onCodeChange(); }
+      };
+      ci.onblur = () => { if ($('.tcode-err', card).textContent) { ci.value = st.codes[id] || ''; $('.tcode-err', card).textContent = ''; ci.classList.remove('bad'); } };
       const fbox = $('.tfields', card);
       for (const f of t.fields) fbox.appendChild(fieldInput(f, v, () => { save(); refreshResults(); }, t));
       $('[data-rm]', card).onclick = async () => {
         const has = Object.values(v).some(x => x !== '' && x != null && !(Array.isArray(x) && !x.filter(y => y !== '').length));
         if (has && !(await confirmBox(`ลบการทดสอบ ${t.short} และค่าที่บันทึกไว้ออกจากจุดนี้?`, { ok: 'ลบ', danger: true }))) return;
-        delete st.tests[id]; save.flush(); drawCards(); ctx.onCodeChange();
+        delete st.tests[id]; delete st.codes[id]; syncPrimary(); save.flush(); drawCards(); ctx.onCodeChange();
       };
       cards.appendChild(card);
       drawResult(card, id);
@@ -113,7 +113,11 @@ export function buildTestPanel(box, ctx) {
   $('#addTest', box).onclick = (e) => {
     const anchor = e.currentTarget;
     const avail = allTypes(project).filter(t => !st.tests[t.id]);
-    import('./app.js').then(({ dropdown }) => dropdown(anchor, avail.map(t => ({ label: t.label, fn: () => { st.tests[t.id] = {}; save.flush(); drawCards(); ctx.onCodeChange(); } }))));
+    import('./app.js').then(({ dropdown }) => dropdown(anchor, avail.map(t => ({ label: t.label, fn: () => {
+      st.tests[t.id] = {};
+      st.codes[t.id] = nextCode(project, ctx.stations, typePrefix(project, t.id));
+      syncPrimary(); save.flush(); drawCards(); ctx.onCodeChange();
+    } }))));
   };
   const disableAll = () => $$('input, select, textarea, .seg button, .tfields button', $('.rbody', box)).forEach(x => { x.disabled = true; });
   drawCards();
@@ -161,11 +165,12 @@ export function pickTypeSet(anchor, project, onPick) {
   const ts = settingsOf(project);
   const cur = new Set(ts.lastSet || []);
   const types = allTypes(project);
+  const single = cur.size === 1 ? [...cur][0] : null;
   const body = h(`<div class="dropdown tset">
-    <div class="hint" style="padding:4px 8px">ชนิดการทดสอบของจุดที่จะปักต่อไป (เลือกได้หลายชนิด = สถานีทดสอบ)</div>
-    ${PRESETS.map((p, i) => `<button data-preset="${i}">⚡ ${esc(p.label)}</button>`).join('')}<hr>
-    <div class="tset-list">${types.map(t => `<label><input type="checkbox" value="${t.id}" ${cur.has(t.id) ? 'checked' : ''}> ${esc(t.label)}</label>`).join('')}</div>
-    <div style="display:flex;justify-content:flex-end;padding:6px"><button class="btn sm primary" data-ok style="width:auto">ใช้ชุดนี้</button></div></div>`);
+    <div class="hint" style="padding:4px 8px">ชนิดการทดสอบของจุดที่จะปักต่อไป (1 จุด = 1 การทดสอบ เพิ่มการทดสอบอื่นที่ตำแหน่งเดียวกันได้ภายหลัง)</div>
+    <div class="tset-list">${types.map(t => `<button data-one="${t.id}" class="${t.id === single ? 'on' : ''}"><span class="pre">${esc(t.prefix)}</span>${esc(t.label)}</button>`).join('')}</div>
+    <hr><div class="hint" style="padding:2px 8px">หรือปักเป็นสถานีทดสอบหลายวิธีในครั้งเดียว</div>
+    ${PRESETS.map((p, i) => `<button data-preset="${i}">⚡ ${esc(p.label)}</button>`).join('')}</div>`);
   $$('.dropdown').forEach(d => d.remove());
   document.body.appendChild(body);
   const r = anchor.getBoundingClientRect();
@@ -173,7 +178,7 @@ export function pickTypeSet(anchor, project, onPick) {
   body.style.top = Math.max(8, r.top - body.offsetHeight - 6) + 'px';
   const done = (ids) => { if (!ids.length) { toast('เลือกอย่างน้อย 1 ชนิด', 'error'); return; } ts.lastSet = ids; body.remove(); onPick(ids); };
   $$('[data-preset]', body).forEach(b => b.onclick = () => done(PRESETS[+b.dataset.preset].ids));
-  $('[data-ok]', body).onclick = () => done($$('input:checked', body).map(x => x.value));
+  $$('[data-one]', body).forEach(b => b.onclick = () => done([b.dataset.one]));
   setTimeout(() => {
     const off = (e) => { if (!body.contains(e.target)) { body.remove(); document.removeEventListener('mousedown', off); } };
     document.addEventListener('mousedown', off);

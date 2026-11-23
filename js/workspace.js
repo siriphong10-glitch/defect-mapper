@@ -5,8 +5,9 @@ import { loadBundle, touch, suggestNo, isDuplicateNo, renumberAll } from './proj
 import { TYPE_LABELS, fieldByRole, severityInfo, NO_SEVERITY_COLOR, textOn, defectTitle } from './templates.js';
 import { dropdown, projectDialog, editLogin } from './app.js';
 import * as sync from './sync.js';
-import { prefixFor, nextCode, stationLevel, levelColor, typeDef, settingsOf, allTypes } from './tests.js';
+import { prefixFor, nextCode, stationLevel, levelColor, typeDef, settingsOf, allTypes, ensureCodes, stationLabel, typePrefix, codeOf } from './tests.js';
 import { buildTestPanel, stationChips, pickTypeSet, testSettingsEditor } from './test-panel.js';
+import { renderDashboard, exportDashboardPng } from './dashboard.js';
 import './keypad.js';
 
 const ICON = {
@@ -46,14 +47,16 @@ export async function openWorkspace(root, projectId) {
     root, ...b,
     floorId: null, selectedId: null, tool: 'select', copyPrev: false, showLabels: true,
     view: { tx: 0, ty: 0, s: 1 }, draft: null, img: null, imgUrl: null, lastCreatedId: null,
-    filter: '', mode: localStorage.getItem('dm_mode_' + projectId) === 'test' ? 'test' : 'defect',
+    filter: '', mode: ['test', 'overview'].includes(localStorage.getItem('dm_mode_' + projectId)) ? localStorage.getItem('dm_mode_' + projectId) : 'defect',
     showOther: localStorage.getItem('dm_show_other') !== '0',
     confirm: localStorage.getItem('dm_confirm') !== '0', pending: null,
   };
   S.floorId = (b.floors[0] || {}).id || null;
+  ensureCodes(b.project, S.tests);
   document.title = b.project.name + ' — Defect Mapper';
   renderShell();
   await selectFloor(S.floorId, true);
+  if (S.mode === 'overview') renderDash();
   startPolling();
   return true;
 }
@@ -84,7 +87,7 @@ async function reloadFromLocal() {
   const b = await loadBundle(S.project.id);
   if (!b) return;
   const oldFloor = curFloor();
-  S.project = b.project; S.floors = b.floors; S.defects = b.defects; S.tests = b.tests;
+  S.project = b.project; S.floors = b.floors; S.defects = b.defects; S.tests = b.tests; ensureCodes(S.project, S.tests);
   if (S.selectedId && !selected()) S.selectedId = null;
   renderTitle();
   const nf = curFloor();
@@ -112,11 +115,11 @@ export function defectColor(project, d) {
 function renderShell() {
   const p = P();
   S.root.innerHTML = '';
-  const el = h(`<div class="ws" style="--accent:${esc(p.accent)}">
+  const el = h(`<div class="ws ${S.mode === 'overview' ? 'overview' : ''}" style="--accent:${esc(p.accent)}">
     <div class="ws-top">
       <button class="btn ghost" id="back" title="กลับหน้ารวมโครงการ">← โครงการทั้งหมด</button>
       <div class="title"><h2 id="pname"></h2><div class="sub" id="psub"></div></div>
-      <div class="mode-seg" id="modeSeg"><button data-mode="defect" class="${!isTest() ? 'on' : ''}">ความเสียหาย</button><button data-mode="test" class="${isTest() ? 'on' : ''}">ผลทดสอบ</button></div>
+      <div class="mode-seg" id="modeSeg"><button data-mode="overview" class="${S.mode === 'overview' ? 'on' : ''}">ภาพรวม</button><button data-mode="defect" class="${S.mode === 'defect' ? 'on' : ''}">ความเสียหาย</button><button data-mode="test" class="${isTest() ? 'on' : ''}">ผลทดสอบ</button></div>
       <span data-sync></span>
       ${sync.REMOTE ? `<button class="btn ghost" id="btnAuth">${canEdit() ? '🔓 ออกโหมดแก้ไข' : '🔒 เข้าโหมดแก้ไข'}</button>` : ''}
       <button class="btn edit-only" id="btnTpl" title="${isTest() ? 'ตั้งค่าการทดสอบและเกณฑ์ประเมิน' : 'แก้ไขหัวข้อและตัวเลือกความเสียหาย'}">${isTest() ? '⚙ การทดสอบและเกณฑ์' : '⚙ หัวข้อความเสียหาย'}</button>
@@ -136,6 +139,7 @@ function renderShell() {
       </aside>
       <div class="ws-canvas" id="canvas"></div>
       <aside class="ws-right closed" id="right"></aside>
+      <div class="dash-wrap" id="dash"></div>
     </div>
     <div class="ws-tools" id="tools"></div>
   </div>`);
@@ -151,11 +155,12 @@ function renderShell() {
     const { templateEditor } = await import('./tpl-editor.js');
     templateEditor(P(), async () => {
       await touch(P());
-      const nb = await loadBundle(P().id); S.defects = nb.defects; S.tests = nb.tests; // option renames may have updated pins
+      const nb = await loadBundle(P().id); S.defects = nb.defects; S.tests = nb.tests; ensureCodes(P(), S.tests); // option renames may have updated pins
       refreshAll();
     });
   };
   const openExport = async (fmt) => {
+    if (fmt === 'dashboard' || (!fmt && S.mode === 'overview')) { if (S.mode !== 'overview') await setMode('overview'); exportDashboardPng(P()); return; }
     if (fmt === 'tests' || (!fmt && isTest())) { const { exportTestsDialog } = await import('./test-export.js'); exportTestsDialog(S.project.id); return; }
     const { exportDialog } = await import('./export.js');
     if (!fmt) fmt = (await db.getMeta('exportPrefs', {})).lastFormat || 'word';
@@ -171,6 +176,9 @@ function renderShell() {
     })), '-', {
       html: `<span class="fmt-ic" style="background:#0f766e">T</span><span class="fmt-txt">ผลทดสอบ (Word / CSV / Excel)<small>ตารางผลแยกตามชนิดการทดสอบ พร้อมเกณฑ์</small></span>`,
       fn: () => openExport('tests'),
+    }, {
+      html: `<span class="fmt-ic" style="background:#7c3aed">▦</span><span class="fmt-txt">ภาพ Dashboard (.png)<small>ภาพรวมโครงการ 1 หน้า สำหรับนำเสนอ</small></span>`,
+      fn: () => openExport('dashboard'),
     }]);
   };
   sync.renderStatus();
@@ -184,6 +192,7 @@ function renderShell() {
       { label: '✎ แก้ไขข้อมูลโครงการ', fn: () => projectDialog(P(), () => { renderTitle(); refreshAll(); }) },
       { label: '#  เรียงเลขลำดับใหม่ทั้งโครงการ (1…n)', fn: renumber },
       '-'] : []),
+    { label: `👤 ชื่อผู้บันทึก: ${localStorage.getItem('dm_user') || '(ยังไม่ได้ตั้ง)'}`, fn: async () => { const n = await promptBox('ชื่อผู้บันทึก', localStorage.getItem('dm_user') || '', { label: 'ใช้แสดงในหน้าภาพรวมว่าใครบันทึกจุดไหน' }); if (n) { localStorage.setItem('dm_user', n); toast('บันทึกชื่อแล้ว', 'ok'); } } },
     { label: '⤓ ส่งออกแพ็กข้อมูล / สำรอง (.zip)', fn: async () => { const { exportPack } = await import('./export.js'); exportPack(P().id); } },
   ]);
   $('#lfilter').oninput = (e) => { S.filter = e.target.value; renderList(); };
@@ -202,6 +211,30 @@ async function setMode(m) {
   cancelPending();
   renderShell();
   await selectFloor(S.floorId);
+  if (m === 'overview') renderDash();
+}
+
+async function renderDash() {
+  const box = $('#dash');
+  if (!box || S.mode !== 'overview') return;
+  const org = await db.getMeta('orgName', 'บริษัท เพอร์ฟอร์มแมกซ์ บิวดิ้ง เซอร์วิซ จำกัด');
+  renderDashboard(box, {
+    project: P(), floors: S.floors, defects: S.defects, tests: S.tests, editable: canEdit(), org,
+    onGoto: async (mode, floorId, itemId) => {
+      await setMode(mode);
+      if (floorId && floorId !== S.floorId) await selectFloor(floorId);
+      if (itemId) { select(itemId); const d = selected(); if (d) centerOn(d); }
+    },
+  });
+}
+
+async function whoAmI() {
+  let n = localStorage.getItem('dm_user');
+  if (!n) {
+    n = await promptBox('ชื่อผู้บันทึก', '', { label: 'ชื่อนี้จะแสดงในหน้าภาพรวมว่าใครบันทึกจุดไหน (ถามครั้งเดียว เปลี่ยนได้ที่เมนู ⋯)' }) || 'ไม่ระบุ';
+    try { localStorage.setItem('dm_user', n); } catch { /* */ }
+  }
+  return n;
 }
 
 function toggleLeft() {
@@ -218,7 +251,7 @@ function renderTitle() {
   S.root.firstElementChild.style.setProperty('--accent', p.accent);
 }
 
-function refreshAll() { renderTabs(); renderList(); renderPins(); renderRight(); }
+function refreshAll() { renderTabs(); renderList(); renderPins(); renderRight(); if (S.mode === 'overview') renderDash(); }
 
 async function renumber() {
   if (P().numbering === 'manual' && !(await confirmBox('เรียงเลขใหม่เป็น 1…n ตามลำดับชั้นและเลขเดิม? เลขที่กำหนดเองไว้จะถูกแทนที่'))) return;
@@ -250,6 +283,7 @@ function renderTabs() {
     { label: '✎ เปลี่ยนชื่อชั้น', fn: () => renameFloor(f) },
     { label: '↔ ตั้งสเกลแปลน', fn: () => setTool('scale') },
     { label: '🖼 เปลี่ยนรูปแปลน (คงตำแหน่งเดิม)', fn: () => replaceFloorImage(f) },
+    { label: '⧉ ทำสำเนาชั้น (ใช้แปลนเดียวกัน เช่น ชั้นทั่วไป)', fn: () => duplicateFloor(f) },
     ...(i > 0 ? [{ label: '↑ ย้ายลำดับขึ้น', fn: () => moveFloor(f, -1) }] : []),
     ...(i < S.floors.length - 1 ? [{ label: '↓ ย้ายลำดับลง', fn: () => moveFloor(f, 1) }] : []),
     '-',
@@ -335,29 +369,55 @@ async function deleteFloor(f) {
   }
   S.defects = S.defects.filter(d => d.floorId !== f.id);
   S.tests = S.tests.filter(d => d.floorId !== f.id);
-  forgetUrl(f.blobId); await db.delBlob(f.blobId); await db.del('floors', f.id);
+  await delDisplayIfUnused(f); await delSourceIfUnused(f); await db.del('floors', f.id);
   S.floors = S.floors.filter(x => x.id !== f.id);
   P().floorOrder = S.floors.map(x => x.id);
   await touch(P());
   await selectFloor(S.floors[0]?.id || null);
 }
 
-async function fileToPlanImages(file, onProgress) {
+// Plan files can be shared: one PDF by several pages, and duplicated floors share the same picture.
+// A file is removed only when no other floor still uses it.
+const blobInUse = (id, exceptFloorId) => S.floors.some(x => x.id !== exceptFloorId && (x.blobId === id || x.srcBlobId === id));
+async function delSourceIfUnused(f) {
+  if (f.srcBlobId && !blobInUse(f.srcBlobId, f.id)) await db.delBlob(f.srcBlobId);
+}
+async function delDisplayIfUnused(f) {
+  if (f.blobId && !blobInUse(f.blobId, f.id)) { forgetUrl(f.blobId); await db.delBlob(f.blobId); }
+}
+
+async function duplicateFloor(f) {
+  const name = await promptBox('ทำสำเนาชั้น (ใช้แปลนเดียวกัน)', `${f.name} (สำเนา)`, { label: 'ชื่อชั้นใหม่ เช่น ชั้น 5' });
+  if (!name) return;
+  const nf = { ...f, id: uid(), name, createdAt: Date.now() }; // same picture/PDF and scale, no points copied
+  await db.put('floors', nf);
+  const i = S.floors.indexOf(f);
+  S.floors.splice(i + 1, 0, nf);
+  P().floorOrder = S.floors.map(x => x.id);
+  await touch(P());
+  await selectFloor(nf.id);
+  toast(`สร้าง “${name}” แล้ว — ใช้แปลนเดียวกับ “${f.name}” (ไม่เปลืองพื้นที่เพิ่ม)`, 'ok', 3500);
+}
+
+async function fileToPlanImages(file, onProgress, onlyPage = null) {
   const isPdf = file.type === 'application/pdf' || /\.pdf$/i.test(file.name);
   const base = file.name.replace(/\.[^.]+$/, '');
   if (!isPdf) {
-    const r = await compressImage(file, 4000, 0.92);
-    return [{ name: base, ...r }];
+    // keep the original file for sharp exports; the working copy is resized for the screen
+    const r = await compressImage(file, 4500, 0.92);
+    const keepSrc = r.blob !== file;
+    return [{ name: base, ...r, src: keepSrc ? { blob: file, type: 'image', key: file } : null }];
   }
   const pdfjs = await import('../vendor/pdf.min.mjs');
   pdfjs.GlobalWorkerOptions.workerSrc = new URL('../vendor/pdf.worker.min.mjs', import.meta.url).href;
   const doc = await pdfjs.getDocument({ data: await file.arrayBuffer() }).promise;
   const out = [];
   for (let i = 1; i <= doc.numPages; i++) {
+    if (onlyPage && i !== onlyPage) continue;
     onProgress && onProgress(`กำลังแปลง PDF หน้า ${i}/${doc.numPages}`);
     const page = await doc.getPage(i);
     const v1 = page.getViewport({ scale: 1 });
-    const scale = Math.min(4, 3500 / Math.max(v1.width, v1.height));
+    const scale = Math.min(6, 4500 / Math.max(v1.width, v1.height));
     const vp = page.getViewport({ scale });
     const c = document.createElement('canvas');
     c.width = Math.round(vp.width); c.height = Math.round(vp.height);
@@ -365,7 +425,8 @@ async function fileToPlanImages(file, onProgress) {
     ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
     await page.render({ canvasContext: ctx, viewport: vp }).promise;
     const blob = await new Promise(r => c.toBlob(r, 'image/jpeg', 0.9));
-    out.push({ name: doc.numPages > 1 ? `${base} - หน้า ${i}` : base, blob, w: c.width, h: c.height });
+    out.push({ name: doc.numPages > 1 ? `${base} - หน้า ${i}` : base, blob, w: c.width, h: c.height, src: { blob: file, type: 'pdf', page: i, key: file } });
+    c.width = c.height = 0;
   }
   return out;
 }
@@ -378,8 +439,11 @@ async function importFloors() {
   try {
     for (const file of files) {
       const imgs = await fileToPlanImages(file, (t) => { $('#impMsg', m.body).textContent = t; });
+      let srcId = null;
       for (const im of imgs) {
-        const f = { id: uid(), projectId: P().id, name: im.name, blobId: await db.putBlob(im.blob), w: im.w, h: im.h, scale: null, createdAt: Date.now() };
+        if (im.src && !srcId) srcId = await db.putBlob(im.src.blob instanceof File ? new Blob([im.src.blob], { type: im.src.blob.type || (im.src.type === 'pdf' ? 'application/pdf' : 'image/png') }) : im.src.blob);
+        const f = { id: uid(), projectId: P().id, name: im.name, blobId: await db.putBlob(im.blob), w: im.w, h: im.h, scale: null, createdAt: Date.now(),
+          ...(im.src ? { srcBlobId: srcId, srcType: im.src.type, pdfPage: im.src.page || null } : {}) };
         await db.put('floors', f);
         S.floors.push(f);
         firstNew = firstNew || f.id;
@@ -401,7 +465,18 @@ async function importFloors() {
 async function replaceFloorImage(f) {
   const [file] = await pickFiles({ accept: 'image/*,.pdf,application/pdf' });
   if (!file) return;
-  const [im] = await fileToPlanImages(file);
+  let pageNo = 1;
+  if (file.type === 'application/pdf' || /\.pdf$/i.test(file.name)) {
+    const pdfjs = await import('../vendor/pdf.min.mjs');
+    pdfjs.GlobalWorkerOptions.workerSrc = new URL('../vendor/pdf.worker.min.mjs', import.meta.url).href;
+    const n = (await pdfjs.getDocument({ data: await file.arrayBuffer() }).promise).numPages;
+    if (n > 1) {
+      const v = await promptBox('เลือกหน้าของ PDF', String(f.pdfPage && f.pdfPage <= n ? f.pdfPage : 1), { label: `ไฟล์นี้มี ${n} หน้า — ใช้หน้าที่เท่าไรเป็นแปลนของ “${f.name}”` });
+      if (!v) return;
+      pageNo = Math.min(n, Math.max(1, parseInt(v, 10) || 1));
+    }
+  }
+  const im = (await fileToPlanImages(file, null, pageNo))[0];
   if (!im) return;
   const sx = im.w / f.w, sy = im.h / f.h;
   for (const d of [...S.defects, ...S.tests].filter(d => d.floorId === f.id)) {
@@ -409,8 +484,11 @@ async function replaceFloorImage(f) {
     await db.put('defects', d);
   }
   if (f.scale) f.scale = f.scale / sx;
-  forgetUrl(f.blobId); await db.delBlob(f.blobId);
+  await delDisplayIfUnused(f);
+  await delSourceIfUnused(f);
   f.blobId = await db.putBlob(im.blob); f.w = im.w; f.h = im.h;
+  if (im.src) { f.srcBlobId = await db.putBlob(new Blob([im.src.blob], { type: im.src.blob.type || (im.src.type === 'pdf' ? 'application/pdf' : 'image/png') })); f.srcType = im.src.type; f.pdfPage = im.src.page || null; }
+  else { delete f.srcBlobId; delete f.srcType; delete f.pdfPage; }
   await db.put('floors', f); await touch(P());
   await selectFloor(f.id);
   toast('เปลี่ยนรูปแปลนแล้ว (ปรับตำแหน่งจุดตามสัดส่วน)', 'ok');
@@ -447,7 +525,7 @@ function renderTestList() {
   const all = floorDefects();
   $('#lcount').textContent = `${all.length} จุด`;
   const q = S.filter.trim().toLowerCase();
-  const list = all.filter(d => !q || `${d.code} ${Object.keys(d.tests || {}).map(id => typeDef(P(), id)?.short).join(' ')} ${d.element || ''} ${d.place || ''}`.toLowerCase().includes(q))
+  const list = all.filter(d => !q || `${stationLabel(d)} ${Object.keys(d.tests || {}).map(id => typeDef(P(), id)?.short).join(' ')} ${d.element || ''} ${d.place || ''}`.toLowerCase().includes(q))
     .sort((a, b) => naturalCmp(a.code, b.code));
   box.innerHTML = '';
   for (const d of list) {
@@ -455,7 +533,7 @@ function renderTestList() {
     const meta = [d.element, d.place, d.role === 'baseline' ? 'จุดอ้างอิง' : d.role === 'targeted' ? 'จุดเจาะจง' : ''].filter(Boolean).join(' • ');
     const it = h(`<div class="ditem ${d.id === S.selectedId ? 'on' : ''}">
       <span class="badge tbadge" style="background:${levelColor(lv)};color:${lv === 'none' ? 'var(--ink)' : '#fff'}">◆</span>
-      <div class="txt"><div class="t1">${esc(d.code)}${meta ? ` <span class="t2" style="font-weight:400">${esc(meta)}</span>` : ''}</div><div class="tchips">${stationChips(P(), d)}</div></div></div>`);
+      <div class="txt"><div class="t1">${esc(stationLabel(d))}${meta ? ` <span class="t2" style="font-weight:400">${esc(meta)}</span>` : ''}</div><div class="tchips">${stationChips(P(), d)}</div></div></div>`);
     it.onclick = () => { select(d.id); centerOn(d); };
     box.appendChild(it);
   }
@@ -548,7 +626,8 @@ function updateHint() {
   let t = TOOL_HINT[S.tool];
   if (isTest() && S.tool === 'point') {
     const ids = settingsOf(P()).lastSet || [];
-    t = `คลิกบนแปลนเพื่อปักจุดทดสอบ (${ids.map(id => typeDef(P(), id)?.short).filter(Boolean).join(' + ')})  •  รหัสถัดไป: ${nextCode(P(), S.tests, prefixFor(P(), ids))}`;
+    const nx = []; ids.forEach(id => nx.push(nextCode(P(), S.tests, typePrefix(P(), id), nx)));
+    t = `คลิกบนแปลนเพื่อปักจุดทดสอบ (${ids.map(id => typeDef(P(), id)?.short).filter(Boolean).join(' + ')})  •  รหัสถัดไป: ${nx.join(' / ')}`;
   } else if (['point', 'area', 'rect'].includes(S.tool)) t += `  •  เลขถัดไป: ${suggestNo(P(), S.defects)}`;
   if (S.confirm && ['point', 'area', 'rect'].includes(S.tool)) t += '  •  ต้องกดยืนยันก่อนปัก';
   hint.textContent = t;
@@ -610,6 +689,7 @@ function fitView() {
   const c = $('#canvas');
   if (!c || !S.img) { applyView(); return; }
   const W = c.clientWidth, H = c.clientHeight, pad = 24;
+  if (W <= pad * 2 || H <= pad * 2) { S.needFit = true; return; } // canvas hidden (overview) — fit when shown
   const s = Math.min((W - pad * 2) / S.img.w, (H - pad * 2) / S.img.h);
   S.view = { s, tx: (W - S.img.w * s) / 2, ty: (H - S.img.h * s) / 2 };
   S.fitS = s; S.userMoved = false;
@@ -663,7 +743,8 @@ function badge(parent, x, y, text, color, k, square, selectedFlag) {
 
 function renderPins() {
   const layer = $('#pins');
-  if (!layer) return;
+  if (!layer || S.mode === 'overview') return;
+  if (S.needFit && $('#canvas')?.clientWidth > 48) { S.needFit = false; fitView(); return; }
   layer.innerHTML = '';
   $('#draft').innerHTML = '';
   if (!S.img) return;
@@ -689,10 +770,11 @@ function drawTests(layer, list, k, interactive) {
     if (sel) svgEl('rect', { x: x - r - 5 * k, y: y - r - 5 * k, width: 2 * r + 10 * k, height: 2 * r + 10 * k, transform: `rotate(45 ${x} ${y})`, fill: 'none', stroke: '#1f3a5f', 'stroke-width': 2.5 * k }, g);
     svgEl('rect', { x: x - r, y: y - r, width: 2 * r, height: 2 * r, transform: `rotate(45 ${x} ${y})`, fill: col, stroke: lv === 'none' ? '#1f3a5f' : '#fff', 'stroke-width': 2 * k, style: 'filter:drop-shadow(0 1px 1.5px rgba(0,0,0,.45))' }, g);
     if (S.showLabels) {
-      const fs = 11 * k, tw = (String(d.code).length * 6.6 + 10) * k, th = 17 * k, lx = x + 13 * k, ly = y - 22 * k;
+      const label = stationLabel(d);
+      const fs = 11 * k, tw = (String(label).length * 6.6 + 10) * k, th = 17 * k, lx = x + 13 * k, ly = y - 22 * k;
       svgEl('rect', { x: lx, y: ly, width: tw, height: th, rx: 4 * k, fill: '#fff', stroke: col === '#ffffff' ? '#1f3a5f' : col, 'stroke-width': 1.5 * k }, g);
       const t = svgEl('text', { x: lx + tw / 2, y: ly + th * 0.7, 'text-anchor': 'middle', 'font-size': fs, 'font-weight': 700, fill: '#16202c', 'font-family': 'Sarabun, sans-serif' }, g);
-      t.textContent = d.code;
+      t.textContent = label;
     }
   }
 }
@@ -919,6 +1001,7 @@ let spaceDown = false;
 function onKey(e) {
   if (!S || !document.body.contains($('#canvas'))) { document.removeEventListener('keydown', onKey); return; }
   if (document.querySelector('.modal-back, .report-view')) return;
+  if (S.mode === 'overview') return;
   const typing = /INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName) || document.activeElement?.isContentEditable;
   if (S.pending && !typing) {
     if (e.key === 'Enter') { e.preventDefault(); S.pending.resolve(true); return; }
@@ -1006,10 +1089,12 @@ async function place(shape, pts) {
 
 async function createTest(pts) {
   const p = P();
-  const ids = (settingsOf(p).lastSet || ['ferro', 'upv', 'rebound']).filter(id => typeDef(p, id));
-  const tests = {}; ids.forEach(id => { tests[id] = {}; });
+  const ids = (settingsOf(p).lastSet || ['upv']).filter(id => typeDef(p, id));
+  const createdBy = await whoAmI();
+  const tests = {}, codes = {};
+  ids.forEach(id => { tests[id] = {}; codes[id] = nextCode(p, S.tests, typePrefix(p, id), Object.values(codes)); });
   const d = { id: uid(), projectId: p.id, floorId: S.floorId, layer: 'test', shape: 'point', pts,
-    code: nextCode(p, S.tests, prefixFor(p, ids)), role: '', element: '', place: '', tests, photoIds: [], createdAt: Date.now() };
+    code: codes[ids[0]], codes, role: '', element: '', place: '', tests, photoIds: [], createdAt: Date.now(), createdBy };
   await db.put('defects', d);
   S.tests.push(d);
   await touch(p);
@@ -1022,10 +1107,11 @@ async function createDefect(shape, pts) {
   if (!canEdit()) return;
   const p = P();
   const prev = S.defects.find(d => d.id === S.lastCreatedId) || selected();
+  const createdBy = await whoAmI();
   const d = {
     id: uid(), projectId: p.id, floorId: S.floorId,
     no: suggestNo(p, S.defects), shape, pts,
-    type: p.defaultType || 'structural', data: {}, photoIds: [], createdAt: Date.now(),
+    type: p.defaultType || 'structural', data: {}, photoIds: [], createdAt: Date.now(), createdBy,
   };
   if (S.copyPrev && prev) { d.type = prev.type; d.data = JSON.parse(JSON.stringify(prev.data || {})); }
   await db.put('defects', d);
@@ -1044,7 +1130,7 @@ function select(id) {
 
 async function deleteDefect(d) {
   if (!canEdit()) return;
-  if (!(await confirmBox(d.layer === 'test' ? `ลบจุดทดสอบ ${d.code} พร้อมค่าที่บันทึกไว้?` : `ลบจุดที่ ${d.no}?`, { ok: 'ลบ', danger: true }))) return;
+  if (!(await confirmBox(d.layer === 'test' ? `ลบจุดทดสอบ ${stationLabel(d)} พร้อมค่าที่บันทึกไว้?` : `ลบจุดที่ ${d.no}?`, { ok: 'ลบ', danger: true }))) return;
   for (const ph of d.photoIds || []) { forgetUrl(ph); await db.delBlob(ph); }
   await db.del('defects', d.id);
   S.defects = S.defects.filter(x => x.id !== d.id);

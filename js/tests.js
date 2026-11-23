@@ -405,8 +405,10 @@ export const PRESETS = [
 // ------------------------------------------------------------------ resolved type (built-in + project overrides)
 const clone = (x) => JSON.parse(JSON.stringify(x));
 export function settingsOf(project) {
-  project.testSettings ||= { types: {}, custom: [], lastSet: ['ferro', 'upv', 'rebound'], prefix: 'ST' };
-  return project.testSettings;
+  project.testSettings ||= { types: {}, custom: [], lastSet: ['upv'], prefix: 'ST' };
+  const ts = project.testSettings;
+  if (!ts.singleDefault) { if (!(ts.lastSet?.length === 1)) ts.lastSet = ['upv']; ts.singleDefault = true; } // 1 point = 1 test by default
+  return ts;
 }
 
 export function typeDef(project, id) {
@@ -474,16 +476,41 @@ export function fieldValueText(f, v) {
   return String(v);
 }
 
-// ------------------------------------------------------------------ station codes
+// ------------------------------------------------------------------ codes (each test in a station has its own running code, e.g. UPV-03 / RH-05)
+export const codeOf = (st, id) => st.codes?.[id] || st.code;
+export const stationLabel = (st) => {
+  const ids = Object.keys(st.tests || {});
+  return ids.length ? ids.map(id => codeOf(st, id)).join(' / ') : st.code;
+};
+export const allCodes = (stations) => stations.flatMap(s => [s.code, ...Object.values(s.codes || {})]).filter(Boolean).map(c => String(c).trim().toLowerCase());
 export function prefixFor(project, ids) {
   if (ids.length === 1) return typeDef(project, ids[0])?.prefix || 'T';
   return settingsOf(project).prefix || 'ST';
 }
-export function nextCode(project, stations, prefix) {
+export function nextCode(project, stations, prefix, extra = []) {
   let max = 0;
   const re = new RegExp('^' + prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '-?(\\d+)$', 'i');
-  stations.forEach(s => { const m = String(s.code || '').match(re); if (m) max = Math.max(max, +m[1]); });
+  const used = [...allCodes(stations), ...extra.map(c => c.toLowerCase())];
+  used.forEach(c => { const m = c.match(re); if (m) max = Math.max(max, +m[1]); });
   let n = max + 1, code;
-  do { code = `${prefix}-${String(n).padStart(2, '0')}`; n++; } while (stations.some(s => String(s.code).toLowerCase() === code.toLowerCase()));
+  do { code = `${prefix}-${String(n).padStart(2, '0')}`; n++; } while (used.includes(code.toLowerCase()));
   return code;
+}
+export const typePrefix = (project, id) => typeDef(project, id)?.prefix || 'T';
+
+// Give every test its own code (stations made before per-test codes existed). Deterministic, in memory.
+export function ensureCodes(project, stations) {
+  const sorted = [...stations].sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+  for (const st of sorted) {
+    st.codes ||= {};
+    const ids = Object.keys(st.tests || {});
+    ids.forEach((id, i) => {
+      if (st.codes[id]) return;
+      const pre = typePrefix(project, id);
+      if (i === 0 && String(st.code || '').toUpperCase().startsWith(pre.toUpperCase() + '-')) st.codes[id] = st.code;
+      else st.codes[id] = nextCode(project, stations, pre);
+    });
+    Object.keys(st.codes).forEach(id => { if (!st.tests?.[id]) delete st.codes[id]; });
+    if (ids.length) st.code = st.codes[ids[0]];
+  }
 }

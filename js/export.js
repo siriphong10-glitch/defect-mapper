@@ -140,66 +140,176 @@ function roundRect(ctx, x, y, w, hh, r) {
   ctx.arcTo(x, y + hh, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
 }
 
-export async function planCanvas(floor, items, { maxDim = 3000, markerScale = 1, header = null } = {}) {
-  await ensureFonts();
-  const blob = await db.getBlob(floor.blobId);
+// ---- source rendering: re-draw the plan from the original PDF / image at the size needed for print
+export const IS_IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const MAX_PIXELS = IS_IOS ? 16.5e6 : 48e6; // iOS Safari refuses canvases above ~16.7 MP
+export const PAPER = { A3: [420, 297], A4: [297, 210] };
+const pdfCache = new Map();
+async function pdfDoc(blobId) {
+  if (!pdfCache.has(blobId)) {
+    pdfCache.set(blobId, (async () => {
+      const blob = await db.getBlob(blobId);
+      if (!blob) return null;
+      const pdfjs = await import('../vendor/pdf.min.mjs');
+      pdfjs.GlobalWorkerOptions.workerSrc = new URL('../vendor/pdf.worker.min.mjs', import.meta.url).href;
+      return pdfjs.getDocument({ data: await blob.arrayBuffer() }).promise;
+    })());
+  }
+  return pdfCache.get(blobId);
+}
+async function drawSource(ctx, floor, x, y, W, H) {
+  if (floor.srcType === 'pdf' && floor.srcBlobId) {
+    try {
+      const doc = await pdfDoc(floor.srcBlobId);
+      if (doc) {
+        const page = await doc.getPage(floor.pdfPage || 1);
+        const v1 = page.getViewport({ scale: 1 });
+        const vp = page.getViewport({ scale: W / v1.width });
+        const c = document.createElement('canvas');
+        c.width = W; c.height = H;
+        const cx = c.getContext('2d');
+        cx.fillStyle = '#fff'; cx.fillRect(0, 0, W, H);
+        await page.render({ canvasContext: cx, viewport: vp }).promise;
+        ctx.drawImage(c, x, y, W, H);
+        c.width = c.height = 0;
+        return 'pdf';
+      }
+    } catch (err) { console.warn('PDF re-render failed, using stored image', err); }
+  }
+  const blob = (floor.srcType === 'image' && floor.srcBlobId && await db.getBlob(floor.srcBlobId)) || await db.getBlob(floor.blobId);
   const url = URL.createObjectURL(blob);
   const img = await loadImage(url);
   URL.revokeObjectURL(url);
-  const s = Math.min(1, maxDim / Math.max(floor.w, floor.h));
-  const W = Math.round(floor.w * s), H = Math.round(floor.h * s);
-  const k = Math.max(W, H) / 1000 * markerScale;
-  const headH = header ? Math.round(Math.max(56, 46 * Math.max(W, H) / 1400)) : 0;
-  const c = document.createElement('canvas');
-  c.width = W; c.height = H + headH;
-  const ctx = c.getContext('2d');
-  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
-  ctx.drawImage(img, 0, headH, W, H);
-  ctx.save(); ctx.translate(0, headH);
-  const P = (p) => [p[0] * s, p[1] * s];
+  ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(img, x, y, W, H);
+  return 'image';
+}
+
+// Fit the plan inside a box. Sizes in mm when dpi is given (print), else in pixels (maxDim, legacy).
+function fitPlan(floor, boxW, boxH) {
+  const s = Math.min(boxW / floor.w, boxH / floor.h);
+  return [floor.w * s, floor.h * s];
+}
+
+// Draw pins/areas. pxPerMm sets marker size on paper (badge 6 mm high at markerScale 1).
+function drawMarks(ctx, items, ox, oy, sc, pxPerMm, markerScale) {
+  const m = pxPerMm * markerScale;
+  const P = (p) => [ox + p[0] * sc, oy + p[1] * sc];
   for (const it of items.filter(i => i.d.shape !== 'point')) {
     ctx.beginPath();
     it.d.pts.forEach((p, i) => { const [x, y] = P(p); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
     ctx.closePath();
     ctx.globalAlpha = 0.28; ctx.fillStyle = it.color; ctx.fill();
-    ctx.globalAlpha = 1; ctx.lineWidth = 2.5 * k; ctx.strokeStyle = it.color; ctx.lineJoin = 'round'; ctx.stroke();
+    ctx.globalAlpha = 1; ctx.lineWidth = 0.6 * m; ctx.strokeStyle = it.color; ctx.lineJoin = 'round'; ctx.stroke();
   }
   const badgeAt = (x, y, text, color, square) => {
-    const fs = 16 * k;
+    const fs = 3.6 * m;
     ctx.font = `700 ${fs}px Sarabun, sans-serif`;
-    const w = Math.max(32 * k, ctx.measureText(text).width + 14 * k), hh = 32 * k;
+    const hh = 6 * m, w = Math.max(hh, ctx.measureText(text).width + 2.6 * m);
     ctx.save();
-    ctx.shadowColor = 'rgba(0,0,0,.4)'; ctx.shadowBlur = 3 * k; ctx.shadowOffsetY = 1 * k;
-    roundRect(ctx, x - w / 2, y - hh / 2, w, hh, square ? 5 * k : hh / 2);
+    ctx.shadowColor = 'rgba(0,0,0,.35)'; ctx.shadowBlur = 0.6 * m; ctx.shadowOffsetY = 0.2 * m;
+    roundRect(ctx, x - w / 2, y - hh / 2, w, hh, square ? 1 * m : hh / 2);
     ctx.fillStyle = color; ctx.fill();
     ctx.restore();
-    roundRect(ctx, x - w / 2, y - hh / 2, w, hh, square ? 5 * k : hh / 2);
-    ctx.lineWidth = 2 * k; ctx.strokeStyle = '#fff'; ctx.stroke();
+    roundRect(ctx, x - w / 2, y - hh / 2, w, hh, square ? 1 * m : hh / 2);
+    ctx.lineWidth = 0.45 * m; ctx.strokeStyle = '#fff'; ctx.stroke();
     ctx.fillStyle = textOn(color); ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.fillText(text, x, y + 1 * k);
+    ctx.fillText(text, x, y + 0.2 * m);
   };
   for (const it of items.filter(i => i.d.shape !== 'point')) { const [x, y] = P(centroid(it.d.pts)); badgeAt(x, y, it.no, it.color, true); }
   for (const it of items.filter(i => i.d.shape === 'point')) { const [x, y] = P(it.d.pts[0]); badgeAt(x, y, it.no, it.color, false); }
-  ctx.restore();
-  if (header) {
-    const f = headH * 0.36;
-    ctx.fillStyle = '#1f3a5f'; ctx.fillRect(0, 0, W, headH);
-    ctx.fillStyle = '#fff'; ctx.textBaseline = 'middle'; ctx.textAlign = 'left';
-    ctx.font = `700 ${f}px Sarabun, sans-serif`;
-    ctx.fillText(header.title, f * 0.8, headH / 2);
-    let x = W - f * 0.8;
-    ctx.font = `400 ${f * 0.8}px Sarabun, sans-serif`;
-    ctx.textAlign = 'right';
-    for (const lg of [...header.legend].reverse()) {
-      const tw = ctx.measureText(lg.label).width;
-      ctx.fillStyle = '#fff'; ctx.fillText(lg.label, x, headH / 2);
-      x -= tw + f * 0.5;
-      ctx.beginPath(); ctx.arc(x, headH / 2, f * 0.32, 0, Math.PI * 2); ctx.fillStyle = lg.color; ctx.fill();
-      ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.stroke();
-      x -= f * 1.1;
+}
+
+// Plan only (no page). opts: { boxMm:[w,h], dpi } for print, or { maxDim } in pixels.
+export async function planCanvas(floor, items, { maxDim = 3000, boxMm = null, dpi = 300, markerScale = 1, header = null } = {}) {
+  await ensureFonts();
+  let W, H, pxPerMm;
+  if (boxMm) {
+    const [wMm, hMm] = fitPlan(floor, boxMm[0], boxMm[1]);
+    pxPerMm = dpi / 25.4;
+    W = Math.round(wMm * pxPerMm); H = Math.round(hMm * pxPerMm);
+  } else {
+    const s = Math.min(maxDim / Math.max(floor.w, floor.h), 4);
+    W = Math.round(floor.w * s); H = Math.round(floor.h * s);
+    pxPerMm = Math.max(W, H) / 400; // as if printed on A3
+  }
+  const headH = header ? Math.round(12 * pxPerMm) : 0;
+  const cap = Math.sqrt(MAX_PIXELS / (W * (H + headH)));
+  if (cap < 1) { W = Math.floor(W * cap); H = Math.floor(H * cap); pxPerMm *= cap; }
+  const hh = header ? Math.round(12 * pxPerMm) : 0;
+  const c = document.createElement('canvas');
+  c.width = W; c.height = H + hh;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
+  await drawSource(ctx, floor, 0, hh, W, H);
+  drawMarks(ctx, items, 0, hh, W / floor.w, pxPerMm, markerScale);
+  if (header) drawHeaderBand(ctx, 0, 0, W, hh, header);
+  return c;
+}
+
+function drawHeaderBand(ctx, x0, y0, W, hh, header) {
+  const f = hh * 0.4;
+  ctx.fillStyle = '#1f3a5f'; ctx.fillRect(x0, y0, W, hh);
+  ctx.fillStyle = '#fff'; ctx.textBaseline = 'middle'; ctx.textAlign = 'left';
+  ctx.font = `700 ${f}px Sarabun, sans-serif`;
+  ctx.fillText(header.title, x0 + f * 0.8, y0 + hh / 2);
+  let x = x0 + W - f * 0.8;
+  ctx.font = `400 ${f * 0.8}px Sarabun, sans-serif`;
+  ctx.textAlign = 'right';
+  for (const lg of [...(header.legend || [])].reverse()) {
+    const tw = ctx.measureText(lg.label).width;
+    ctx.fillStyle = '#fff'; ctx.fillText(lg.label, x, y0 + hh / 2);
+    x -= tw + f * 0.5;
+    ctx.beginPath(); ctx.arc(x, y0 + hh / 2, f * 0.32, 0, Math.PI * 2); ctx.fillStyle = lg.color; ctx.fill();
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = Math.max(1.5, f * 0.06); ctx.stroke();
+    x -= f * 1.1;
+  }
+}
+
+// A whole printable page (A3/A4) with title, plan and legend, at the given dpi.
+export async function planPage(floor, items, { paper = 'A3', dpi = 300, markerScale = 1, title = '', subtitle = '', legend = [], foot = '' } = {}) {
+  await ensureFonts();
+  const [lw, sw] = PAPER[paper];
+  const land = floor.w >= floor.h;
+  let pw = land ? lw : sw, ph = land ? sw : lw;
+  let pxPerMm = dpi / 25.4;
+  let W = Math.round(pw * pxPerMm), H = Math.round(ph * pxPerMm);
+  const cap = Math.sqrt(MAX_PIXELS / (W * H));
+  if (cap < 1) { pxPerMm *= cap; W = Math.floor(W * cap); H = Math.floor(H * cap); }
+  const mm = (v) => v * pxPerMm;
+  const c = document.createElement('canvas');
+  c.width = W; c.height = H;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, H);
+  const M = 12, titleH = 11, legH = legend.length ? 8 : 0, footH = foot ? 5 : 0;
+  // title
+  ctx.fillStyle = '#1f3a5f'; ctx.textBaseline = 'alphabetic'; ctx.textAlign = 'left';
+  ctx.font = `700 ${mm(5.2)}px Sarabun, sans-serif`;
+  ctx.fillText(title, mm(M), mm(M + 5));
+  if (subtitle) { ctx.fillStyle = '#555'; ctx.font = `400 ${mm(3.4)}px Sarabun, sans-serif`; ctx.fillText(subtitle, mm(M), mm(M + 9.6)); }
+  // plan area
+  const boxW = pw - 2 * M, boxH = ph - 2 * M - titleH - legH - footH;
+  const [wMm, hMm] = fitPlan(floor, boxW, boxH);
+  const ox = mm(M + (boxW - wMm) / 2), oy = mm(M + titleH + (boxH - hMm) / 2);
+  const PW = Math.round(mm(wMm)), PH = Math.round(mm(hMm));
+  await drawSource(ctx, floor, ox, oy, PW, PH);
+  ctx.strokeStyle = '#999'; ctx.lineWidth = Math.max(1, mm(0.2)); ctx.strokeRect(ox, oy, PW, PH);
+  drawMarks(ctx, items, ox, oy, PW / floor.w, pxPerMm, markerScale);
+  // legend
+  if (legend.length) {
+    let x = mm(M); const y = mm(ph - M - footH - 2.5);
+    ctx.textBaseline = 'middle'; ctx.textAlign = 'left';
+    ctx.font = `700 ${mm(3.2)}px Sarabun, sans-serif`; ctx.fillStyle = '#16202c';
+    ctx.fillText('สัญลักษณ์:', x, y); x += ctx.measureText('สัญลักษณ์:').width + mm(3);
+    ctx.font = `400 ${mm(3.2)}px Sarabun, sans-serif`;
+    for (const lg of legend) {
+      ctx.beginPath(); ctx.arc(x + mm(1.6), y, mm(1.6), 0, Math.PI * 2); ctx.fillStyle = lg.color; ctx.fill();
+      ctx.strokeStyle = 'rgba(0,0,0,.35)'; ctx.lineWidth = mm(0.2); ctx.stroke();
+      x += mm(4.6); ctx.fillStyle = '#16202c'; ctx.fillText(lg.label, x, y); x += ctx.measureText(lg.label).width + mm(5);
     }
   }
-  return c;
+  if (foot) { ctx.fillStyle = '#777'; ctx.font = `400 ${mm(2.8)}px Sarabun, sans-serif`; ctx.textAlign = 'right'; ctx.textBaseline = 'alphabetic'; ctx.fillText(foot, mm(pw - M), mm(ph - M + 2)); }
+  return { canvas: c, land, paper, wMm: pw, hMm: ph };
 }
 
 const canvasBlob = (c, type = 'image/png', q = 0.92) => new Promise(r => c.toBlob(r, type, q));
@@ -258,9 +368,9 @@ export async function exportDialog(projectId, initialFmt = 'word') {
     <div class="exp-opts" data-for="image">
       <div class="row" style="flex-wrap:wrap">
         <label class="fld"><span>ชนิดไฟล์</span>${sel('imgType', [['png', 'PNG (คมชัด ไฟล์ใหญ่)'], ['jpg', 'JPG (ไฟล์เล็ก)']], pref('imgType', 'png'))}</label>
-        <label class="fld"><span>ความละเอียด (ด้านยาว)</span>${sel('imgRes', [[2000, 'มาตรฐาน 2,000 px'], [4000, 'สูง 4,000 px'], [6000, 'สูงมาก 6,000 px']], pref('imgRes', 4000))}</label>
+        <label class="fld"><span>ขนาด</span>${sel('imgPaper', [['A3', 'เต็มหน้ากระดาษ A3 (มีชื่อชั้นและสัญลักษณ์)'], ['A4', 'เต็มหน้ากระดาษ A4 (มีชื่อชั้นและสัญลักษณ์)'], ['source', 'เฉพาะแปลน ไม่มีกรอบกระดาษ']], pref('imgPaper', 'A3'))}</label>
       </div>
-      ${ckb('imgHeader', 'ใส่แถบชื่อโครงการ/ชั้น และสัญลักษณ์ระดับความเสียหายด้านบนรูป', pref('imgHeader', true))}
+      ${ckb('imgHeader', 'แบบ “เฉพาะแปลน”: ใส่แถบชื่อโครงการ/ชั้น และสัญลักษณ์ด้านบนรูป', pref('imgHeader', true))}
       <p class="hint">ถ้าเลือกหลายชั้น จะได้ไฟล์ .zip ที่มีรูปแยกทีละชั้น</p>
     </div>
     <div class="exp-opts" data-for="excel">
@@ -283,6 +393,7 @@ export async function exportDialog(projectId, initialFmt = 'word') {
         <label class="chip on"><input type="checkbox" name="fsev" value="__none" checked>ยังไม่ระบุ</label></div></div>
       <div class="row" style="flex-wrap:wrap">
         <label class="fld" data-for="word pdf excel"><span>การเรียงลำดับรายการ</span>${sel('sort', [['no', 'ตามเลขลำดับ'], ['floor', 'ตามชั้น แล้วตามเลขลำดับ']], pref('sort', 'no'))}</label>
+        <label class="fld" data-for="word pdf image"><span>ความละเอียดแปลน${IS_IOS ? ' (iPad/iPhone จำกัดไว้ประมาณ 280 dpi)' : ''}</span>${sel('planDpi', [[200, '200 dpi (ไฟล์เล็กกว่า)'], [300, '300 dpi (คมที่สุด)']], pref('planDpi', 300))}</label>
         <label class="fld" data-for="word pdf image"><span>ขนาดหมุดบนแปลน</span>${sel('marker', [[0.6, 'เล็ก'], [1, 'ปานกลาง'], [1.4, 'ใหญ่'], [1.9, 'ใหญ่มาก']], pref('marker', 1))}</label>
       </div>
       <p class="hint" id="expCount"></p>
@@ -326,7 +437,7 @@ export async function exportDialog(projectId, initialFmt = 'word') {
         const opts = {
           cover: ck('cover'), summary: ck('summary'), plans: ck('plans'), groups: ck('groups'), table: ck('table'), perPoint: ck('perPoint'),
           showUnchecked: ck('showUnchecked'), groupPhotos: +val('groupPhotos'), pointPhotos: +val('pointPhotos'),
-          org: val('org').trim(), marker: +val('marker'), imgHeader: ck('imgHeader'), imgType: val('imgType'), imgRes: +val('imgRes'),
+          org: val('org').trim(), marker: +val('marker'), imgHeader: ck('imgHeader'), imgType: val('imgType'), imgPaper: val('imgPaper'), planDpi: +val('planDpi'),
           xlsSummary: ck('xlsSummary'), xlsCoords: ck('xlsCoords'),
           packAnnotated: ck('packAnnotated'), packPhotos: ck('packPhotos'), packOriginal: ck('packOriginal'),
           sort: val('sort'), floorIds: c.floorIds,
@@ -374,8 +485,13 @@ async function exportImages(projectId, opts, prog = () => {}) {
   for (let i = 0; i < model.perFloor.length; i++) {
     const { floor, items } = model.perFloor[i];
     prog(`กำลังสร้างรูป ${floor.name}`, i / model.perFloor.length);
-    const c = await planCanvas(floor, items, { maxDim: opts.imgRes || 4000, markerScale: opts.marker,
-      header: opts.imgHeader ? { title: `${model.project.name} — ${floor.name} (${items.length} จุด)`, legend } : null });
+    const dpi = opts.planDpi || 300;
+    const c = opts.imgPaper === 'source'
+      ? await planCanvas(floor, items, { boxMm: [400, 400], dpi, markerScale: opts.marker,
+        header: opts.imgHeader ? { title: `${model.project.name} — ${floor.name} (${items.length} จุด)`, legend } : null })
+      : (await planPage(floor, items, { paper: opts.imgPaper || 'A3', dpi, markerScale: opts.marker, legend,
+        title: `${floor.name}`, subtitle: `${model.project.name}${model.project.code ? ' (' + model.project.code + ')' : ''} • ${items.length} ตำแหน่ง`,
+        foot: (opts.org || '') })).canvas;
     const jpg = opts.imgType === 'jpg';
     outs.push({ name: `${String(i + 1).padStart(2, '0')} ${safeName(floor.name)}.${jpg ? 'jpg' : 'png'}`, blob: await canvasBlob(c, jpg ? 'image/jpeg' : 'image/png', 0.92) });
   }
@@ -583,18 +699,18 @@ async function exportWord(projectId, opts, prog = () => {}) {
     for (let i = 0; i < model.perFloor.length; i++) {
       const { floor, items } = model.perFloor[i];
       prog(`กำลังสร้างแปลน ${floor.name}`, 0.1 + 0.4 * i / model.perFloor.length);
-      const c = await planCanvas(floor, items, { maxDim: 3000, markerScale: opts.marker });
-      const land = floor.w / floor.h > 1.15;
+      // plan pages are A3 (landscape or portrait following the plan); everything else stays A4
+      const land = floor.w >= floor.h;
+      const pw = land ? 420 : 297, ph = land ? 297 : 420;
+      const boxMm = [pw - 40, ph - 40 - 30];
+      const c = await planCanvas(floor, items, { boxMm, dpi: opts.planDpi || 300, markerScale: opts.marker });
       const head = para([run(`แปลน${/^(ชั้น|แปลน)/.test(floor.name) ? '' : ' '}${floor.name.replace(/^แปลน\s*/, '')}`, { size: 34, bold: true, color: '1F3A5F' }), run(`   (${items.length} ตำแหน่ง)`, { size: 28, color: '666666' })],
-        { heading: D.HeadingLevel.HEADING_2, after: 120, keepNext: true, pageBreak: !land && (body.length > 0) });
-      if (land) {
-        flush();
-        const lw = PAGE_H - MARGIN * 2, lh = PAGE_W - MARGIN * 2;
-        sections.push({ ...portrait([head, para([await imgRun(c, twipToPx(lw), twipToPx(lh) - 110, true)], { align: D.AlignmentType.CENTER, after: 80 }), legendPara()]),
-          properties: { page: { size: { width: PAGE_W, height: PAGE_H, orientation: D.PageOrientation.LANDSCAPE }, margin: { top: MARGIN, bottom: MARGIN, left: MARGIN, right: MARGIN } } } });
-      } else {
-        body.push(head, para([await imgRun(c, twipToPx(CW), twipToPx(PAGE_H - MARGIN * 2) - 130, true)], { align: D.AlignmentType.CENTER, after: 80 }), legendPara());
-      }
+        { heading: D.HeadingLevel.HEADING_2, after: 120, keepNext: true });
+      flush();
+      const A3W = 16838, A3H = 23811;
+      const mmPx = (v) => v / 25.4 * 96;
+      sections.push({ ...portrait([head, para([await imgRun(c, mmPx(boxMm[0]), mmPx(boxMm[1]), true)], { align: D.AlignmentType.CENTER, after: 80 }), legendPara()]),
+        properties: { page: { size: { width: A3W, height: A3H, orientation: land ? D.PageOrientation.LANDSCAPE : D.PageOrientation.PORTRAIT }, margin: { top: MARGIN, bottom: MARGIN, left: MARGIN, right: MARGIN } } } });
     }
   }
 
@@ -672,6 +788,9 @@ function rpCss() {
   return `
   .rp-page{width:${PW}px;height:${PH}px;background:#fff;margin:0 auto 18px;position:relative;box-shadow:0 2px 10px rgba(0,0,0,.35);overflow:hidden;font-family:Sarabun,sans-serif;color:#000;font-size:13.5px;line-height:1.45}
   .rp-page.land{width:${PH}px;height:${PW}px}
+  .rp-page.a3{width:1123px;height:1587px}.rp-page.a3.land{width:1587px;height:1123px}
+  .rp-page.a3 .a3img{position:absolute;inset:0;width:100%;height:100%}
+  .rp-page.a3 .rp-foot{bottom:8px}
   .rp-body{position:absolute;left:${PAD}px;right:${PAD}px;top:${PAD + 10}px;bottom:${PAD + 6}px;overflow:hidden}
   .rp-head{position:absolute;left:${PAD}px;right:${PAD}px;top:22px;font-size:11px;color:#666;text-align:right;border-bottom:1px solid #ccc;padding-bottom:3px}
   .rp-foot{position:absolute;left:${PAD}px;right:${PAD}px;bottom:20px;font-size:11px;color:#666;text-align:right}
@@ -695,7 +814,7 @@ function rpCss() {
   .rp-cover img{max-width:520px;max-height:330px;border-radius:6px;margin-bottom:28px;object-fit:cover}
   .rp-cover .info{font-size:16px;line-height:1.9}.rp-cover .org{margin-top:auto;font-size:17px;font-weight:700;color:#1f3a5f}
   @page{size:A4;margin:0}
-  @media print{.rp-page{box-shadow:none;margin:0;page-break-after:always;break-after:page}.rp-page.land{page:land}@page land{size:A4 landscape}}
+  @media print{.rp-page{box-shadow:none;margin:0;page-break-after:always;break-after:page}.rp-page.land{page:land}@page land{size:A4 landscape}.rp-page.a3{page:a3p}.rp-page.a3.land{page:a3l}@page a3p{size:A3 portrait}@page a3l{size:A3 landscape}}
   `;
 }
 
@@ -749,13 +868,13 @@ async function buildPdfBlocks(model, opts, urls, prog) {
     for (let i = 0; i < model.perFloor.length; i++) {
       const { floor, items } = model.perFloor[i];
       prog(`กำลังสร้างแปลน ${floor.name}`, 0.1 + 0.35 * i / model.perFloor.length);
-      const c = await planCanvas(floor, items, { maxDim: 2600, markerScale: opts.marker });
-      const u = URL.createObjectURL(await canvasBlob(c, 'image/jpeg', 0.9));
+      const pg = await planPage(floor, items, { paper: 'A3', dpi: opts.planDpi || 300, markerScale: opts.marker, legend: legendOf(model),
+        title: `แปลน${/^(ชั้น|แปลน)/.test(floor.name) ? '' : ' '}${floor.name.replace(/^แปลน\s*/, '')}`, subtitle: `${p.name} • ${items.length} ตำแหน่ง`, foot: opts.org || '' });
+      const blob = await canvasBlob(pg.canvas, 'image/jpeg', 0.93);
+      pg.canvas.width = pg.canvas.height = 0;
+      const u = URL.createObjectURL(blob);
       urls['plan_' + floor.id] = u;
-      const land = floor.w / floor.h > 1.15;
-      const maxH = (land ? PW : PH) - PAD * 2 - 16 - 70;
-      blocks.push({ page: land ? 'land' : 'new', html: `<h2>แปลน${/^(ชั้น|แปลน)/.test(floor.name) ? '' : ' '}${esc(floor.name.replace(/^แปลน\s*/, ''))} <span style="font-weight:400;color:#666;font-size:14px">(${items.length} ตำแหน่ง)</span></h2>
-        <div class="rp-plan"><img src="${u}" style="max-height:${maxH}px"></div>${legendHtml}` });
+      blocks.push({ page: 'a3', land: pg.land, img: u });
     }
   }
   if (opts.groups) {
@@ -804,6 +923,14 @@ async function paginate(blocks, host, headText) {
   const over = () => body.scrollHeight > body.clientHeight + 1;
   let curKind = null;
   for (const b of blocks) {
+    if (b.page === 'a3') { // full A3 plan page rendered at print resolution
+      const pg = h(`<div class="rp-page a3 ${b.land ? 'land' : ''}"><img class="a3img" src="${b.img}"><div class="rp-foot"></div></div>`);
+      pg.dataset.img = b.img;
+      host.appendChild(pg); pages.push(pg);
+      await waitImages(pg);
+      body = null; curKind = 'a3';
+      continue;
+    }
     if (b.page === 'cover') { newPage('cover'); body.innerHTML = b.html; await waitImages(body); body = null; curKind = 'cover'; continue; }
     const want = b.page === 'land' ? 'land' : 'port';
     if (!body || curKind !== want || ((b.page === 'new' || b.page === 'land') && body.childNodes.length)) { newPage(want); curKind = want; }
@@ -860,13 +987,27 @@ async function exportPdf(projectId, opts, prog = () => {}) {
         btn.textContent = `กำลังสร้าง ${i + 1}/${pages.length}…`;
         const pg = pages[i];
         const land = pg.classList.contains('land');
-        const shadow = pg.style.boxShadow; pg.style.boxShadow = 'none';
-        const c = await html2canvas(pg, { scale: 2, backgroundColor: '#ffffff', useCORS: true, logging: false });
-        pg.style.boxShadow = shadow;
+        const a3 = pg.classList.contains('a3');
         const orient = land ? 'landscape' : 'portrait';
-        if (!pdf) pdf = new jsPDF({ orientation: orient, unit: 'mm', format: 'a4', compress: true });
-        else pdf.addPage('a4', orient);
-        pdf.addImage(c.toDataURL('image/jpeg', 0.9), 'JPEG', 0, 0, land ? 297 : 210, land ? 210 : 297, undefined, 'FAST');
+        const fmt = a3 ? 'a3' : 'a4';
+        const [pw, ph] = a3 ? (land ? [420, 297] : [297, 420]) : (land ? [297, 210] : [210, 297]);
+        let dataUrl;
+        if (a3) {
+          const pn = $('.rp-foot', pg)?.textContent || '';
+          const img = $('.a3img', pg);
+          const c = document.createElement('canvas'); c.width = img.naturalWidth; c.height = img.naturalHeight;
+          const cx = c.getContext('2d'); cx.drawImage(img, 0, 0);
+          if (pn) { const s = c.width / pw; cx.font = `400 ${2.8 * s}px Sarabun, sans-serif`; cx.fillStyle = '#777'; cx.textAlign = 'right'; cx.fillText(pn, c.width - 12 * s, c.height - 5 * s); }
+          dataUrl = c.toDataURL('image/jpeg', 0.93); c.width = c.height = 0;
+        } else {
+          const shadow = pg.style.boxShadow; pg.style.boxShadow = 'none';
+          const c = await html2canvas(pg, { scale: 2, backgroundColor: '#ffffff', useCORS: true, logging: false });
+          pg.style.boxShadow = shadow;
+          dataUrl = c.toDataURL('image/jpeg', 0.9);
+        }
+        if (!pdf) pdf = new jsPDF({ orientation: orient, unit: 'mm', format: fmt, compress: true });
+        else pdf.addPage(fmt, orient);
+        pdf.addImage(dataUrl, 'JPEG', 0, 0, pw, ph, undefined, 'FAST');
       }
       pdf.setProperties({ title: `รายการความเสียหาย-ข้อบกพร่อง ${p.name}` });
       download(pdf.output('blob'), `${fileBase(p)} - รายการความเสียหาย.pdf`);
@@ -902,8 +1043,12 @@ export async function exportPack(projectId, prog = () => {}, popts = {}) {
       const f = floors[i];
       prog(`แปลน ${f.name}`, i / floors.length * 0.5);
       if (po.original) await addBlob(f.blobId, `plans/original/${String(i + 1).padStart(2, '0')}_${safeName(f.name)}.${ext(await db.getBlob(f.blobId))}`);
+      if (po.original && f.srcBlobId && !blobsMap[f.srcBlobId]) {
+        const sb = await db.getBlob(f.srcBlobId);
+        if (sb) { const path = `plans/source/${safeName(f.name)}.${sb.type === 'application/pdf' ? 'pdf' : ext(sb)}`; zip.file(path, sb); blobsMap[f.srcBlobId] = path; }
+      }
       if (!po.annotated) continue;
-      const c = await planCanvas(f, model.perFloor[i].items, { maxDim: 3000, header: { title: `${p.name} — ${f.name}`, legend: legendOf(model) } });
+      const c = (await planPage(f, model.perFloor[i].items, { paper: 'A3', dpi: 200, legend: legendOf(model), title: f.name, subtitle: `${p.name} • ${model.perFloor[i].items.length} ตำแหน่ง` })).canvas;
       zip.file(`plans/annotated/${String(i + 1).padStart(2, '0')}_${safeName(f.name)}.png`, await canvasBlob(c));
     }
     for (const it of po.photos ? model.items : []) {
@@ -1005,7 +1150,7 @@ export async function importPack(file) {
   if (!pj) throw new Error('ไม่พบ project.json ในไฟล์ zip');
   const data = JSON.parse(await pj.async('string'));
   if (data.format !== PACK_FORMAT) throw new Error('ไฟล์นี้ไม่ใช่แพ็กข้อมูลของ Defect Mapper');
-  const mime = (path) => (/\.png$/i.test(path) ? 'image/png' : 'image/jpeg');
+  const mime = (path) => (/\.png$/i.test(path) ? 'image/png' : /\.pdf$/i.test(path) ? 'application/pdf' : 'image/jpeg');
   const newBlob = {};
   const blobFor = async (oldId) => {
     if (!oldId) return null;
@@ -1022,7 +1167,7 @@ export async function importPack(file) {
   if (existing) p.name = p.name + ' (นำเข้า)';
   const floorMap = {};
   for (const f of data.floors) {
-    const nf = { ...f, id: uid(), projectId: p.id, blobId: await blobFor(f.blobId) };
+    const nf = { ...f, id: uid(), projectId: p.id, blobId: await blobFor(f.blobId), srcBlobId: f.srcBlobId ? await blobFor(f.srcBlobId) : null };
     if (!nf.blobId) throw new Error('แพ็กนี้ส่งออกโดยไม่รวมแปลนต้นฉบับ จึงนำเข้ากลับไม่ได้');
     floorMap[f.id] = nf.id;
     await db.put('floors', nf);

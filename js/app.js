@@ -110,6 +110,7 @@ async function renderHome(fromPull = false) {
         if (editable && localOnly) items.push({ label: '☁ อัปโหลดขึ้นระบบกลาง (ให้คนอื่นเห็น)', fn: async () => { await sync.uploadProject(p.id); toast('กำลังอัปโหลด — ดูสถานะที่มุมขวาบน', 'ok', 3500); } });
         if (editable) items.push({ label: '✎ แก้ไขข้อมูลโครงการ', fn: () => projectDialog(p) });
         items.push({ label: '⤓ ส่งออก (Word / PDF / Excel / รูป / แพ็กข้อมูล)…', fn: async () => { const { exportDialog } = await import('./export.js'); exportDialog(p.id); } });
+        items.unshift({ label: '📊 เปิดหน้าภาพรวมโครงการ', fn: () => { try { localStorage.setItem('dm_mode_' + p.id, 'overview'); } catch { /* */ } location.hash = `#/p/${p.id}`; } });
         items.push({ label: '⤓ ส่งออกผลทดสอบ (Word / CSV / Excel)…', fn: async () => { const { exportTestsDialog } = await import('./test-export.js'); exportTestsDialog(p.id); } });
         if (editable) items.push('-', { label: '🗑 ลบโครงการ', danger: true, fn: async () => {
           const msg = sync.REMOTE && !localOnly ? `ลบโครงการ “${p.name}” พร้อมแปลนและรูปทั้งหมด ออกจากระบบกลาง? ทุกคนจะมองไม่เห็นโครงการนี้อีก และย้อนกลับไม่ได้` : `ลบโครงการ “${p.name}” พร้อมแปลนและรูปทั้งหมด? การลบไม่สามารถย้อนกลับได้`;

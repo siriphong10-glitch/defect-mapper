@@ -2,7 +2,7 @@
 import { db } from './db.js';
 import { $, $$, esc, h, modal, toast, download, loadScript, naturalCmp, safeName } from './utils.js';
 import { loadBundle } from './project.js';
-import { allTypes, typeDef, evalTest, LEVEL, levelColor, ROLES, fieldValueText } from './tests.js';
+import { allTypes, typeDef, evalTest, LEVEL, levelColor, ROLES, fieldValueText, ensureCodes, codeOf } from './tests.js';
 
 const HEAD_FILL = 'C5D9F1';
 const DEFAULT_ORG = 'บริษัท เพอร์ฟอร์มแมกซ์ บิวดิ้ง เซอร์วิซ จำกัด';
@@ -11,9 +11,11 @@ const DEFAULT_ORG = 'บริษัท เพอร์ฟอร์มแมก�
 export async function buildTestModel(projectId, floorIds = null) {
   const { project, floors, tests } = await loadBundle(projectId);
   const fl = floorIds ? floors.filter(f => floorIds.includes(f.id)) : floors;
+  ensureCodes(project, tests);
   const fo = new Map(fl.map((f, i) => [f.id, i]));
   const stations = tests.filter(s => fo.has(s.floorId))
     .sort((a, b) => fo.get(a.floorId) - fo.get(b.floorId) || naturalCmp(a.code, b.code));
+  // tables are sorted by each test's own code inside typeTable
   const types = allTypes(project, { includeHidden: true }).filter(t => stations.some(s => s.tests?.[t.id]));
   const floorOf = (s) => fl[fo.get(s.floorId)];
   return { project, floors: fl, stations, types, floorOf };
@@ -22,7 +24,9 @@ export async function buildTestModel(projectId, floorIds = null) {
 // table for one test type: { columns:[{key,label,unit,group}], rows:[{cells, level, grade, station}] }
 export function typeTable(model, t, { split = false, includeEmpty = true } = {}) {
   const { project } = model;
-  const rowsSrc = model.stations.filter(s => s.tests?.[t.id]);
+  const fo = new Map(model.floors.map((f, i) => [f.id, i]));
+  const rowsSrc = model.stations.filter(s => s.tests?.[t.id])
+    .sort((a, b) => naturalCmp(codeOf(a, t.id), codeOf(b, t.id)) || (fo.get(a.floorId) ?? 0) - (fo.get(b.floorId) ?? 0));
   const evals = rowsSrc.map(s => evalTest(project, s, t.id));
   const outKeys = [];
   evals.forEach(e => e.out.forEach(o => { if (!outKeys.find(k => k.key === o.key)) outKeys.push({ key: o.key, label: o.label, unit: o.unit }); }));
@@ -37,7 +41,7 @@ export function typeTable(model, t, { split = false, includeEmpty = true } = {})
     else cols.push({ key: f.key, label: f.label.replace(/\s*\(.*\)$/, ''), unit: f.unit, field: f });
   });
   outKeys.forEach(o => cols.push({ key: 'o:' + o.key, label: o.label, unit: o.unit }));
-  cols.push({ key: '_grade', label: 'ผลการประเมิน' }, { key: '_linked', label: 'ความเสียหายที่เกี่ยวข้อง' }, { key: '_note', label: 'หมายเหตุ' });
+  cols.push({ key: '_grade', label: 'ผลการประเมิน' }, { key: '_with', label: 'ทดสอบร่วมกับ' }, { key: '_linked', label: 'ความเสียหายที่เกี่ยวข้อง' }, { key: '_note', label: 'หมายเหตุ' });
   let n = 0;
   const rows = [];
   rowsSrc.forEach((s, i) => {
@@ -45,7 +49,7 @@ export function typeTable(model, t, { split = false, includeEmpty = true } = {})
     if (!includeEmpty && !e.recorded) return;
     const v = s.tests[t.id];
     const cells = {
-      _n: ++n, _code: s.code, _floor: model.floorOf(s)?.name || '', _place: s.place || '', _el: s.element || '', _role: ROLES[s.role || ''] === '—' ? '' : ROLES[s.role || ''],
+      _n: ++n, _code: codeOf(s, t.id), _with: Object.keys(s.tests).filter(k => k !== t.id).map(k => codeOf(s, k)).join(', '), _floor: model.floorOf(s)?.name || '', _place: s.place || '', _el: s.element || '', _role: ROLES[s.role || ''] === '—' ? '' : ROLES[s.role || ''],
       _grade: e.grade || (e.recorded ? '' : 'ยังไม่บันทึกค่า'), _linked: s.linked || '', _note: s.note || '',
     };
     t.fields.forEach(f => {
@@ -56,7 +60,7 @@ export function typeTable(model, t, { split = false, includeEmpty = true } = {})
     rows.push({ cells, level: e.level || 'none', grade: e.grade, station: s });
   });
   // drop columns that are empty in every row (keeps tables readable), but keep the identity columns
-  const keep = cols.filter(c => c.key.startsWith('_') && !['_place', '_el', '_role', '_linked', '_note'].includes(c.key) || rows.some(r => r.cells[c.key] !== '' && r.cells[c.key] != null));
+  const keep = cols.filter(c => c.key.startsWith('_') && !['_place', '_el', '_role', '_with', '_linked', '_note'].includes(c.key) || rows.some(r => r.cells[c.key] !== '' && r.cells[c.key] != null));
   return { columns: keep, rows };
 }
 
@@ -108,6 +112,7 @@ export async function exportTestsDialog(projectId) {
       <label class="ck"><input type="checkbox" name="includeEmpty" ${prefs.includeEmpty !== false ? 'checked' : ''}><span>รวมจุดที่ปักตำแหน่งไว้แต่ยังไม่บันทึกค่า</span></label>
       <label class="ck" data-w><input type="checkbox" name="plans" ${prefs.plans !== false ? 'checked' : ''}><span>แปลนตำแหน่งจุดทดสอบ (แยกตามชนิด)</span></label>
       <label class="ck" data-w><input type="checkbox" name="criteria" ${prefs.criteria !== false ? 'checked' : ''}><span>ตารางเกณฑ์ประเมินที่ใช้ และสรุปจำนวนตามผลประเมิน</span></label>
+      <label class="fld" data-w style="margin-top:6px;max-width:300px"><span>ความละเอียดแปลน (หน้า A3)</span><select name="planDpi" class="inp"><option value="200" ${prefs.planDpi == 200 ? 'selected' : ''}>200 dpi (ไฟล์เล็กกว่า)</option><option value="300" ${prefs.planDpi != 200 ? 'selected' : ''}>300 dpi (คมที่สุด)</option></select></label>
       <label class="fld" data-w style="margin-top:6px"><span>ชื่อหน่วยงานผู้จัดทำ (หัวกระดาษ)</span><input type="text" name="org" value="${esc(org)}"></label>
     </div>
     <div class="fld"><span>ชั้น / แปลน</span><div class="floor-picks">${floors.map(f => `<label class="chip on"><input type="checkbox" name="tfloor" value="${f.id}" checked>${esc(f.name)}</label>`).join('')}</div></div>
@@ -124,7 +129,7 @@ export async function exportTestsDialog(projectId) {
         types: $$('[name=ttype]:checked', b).map(x => x.value),
         floorIds: $$('[name=tfloor]:checked', b).map(x => x.value),
         includeEmpty: $('[name=includeEmpty]', b).checked, plans: $('[name=plans]', b).checked, criteria: $('[name=criteria]', b).checked,
-        org: $('[name=org]', b).value.trim(),
+        org: $('[name=org]', b).value.trim(), planDpi: +$('[name=planDpi]', b).value,
       };
       if (!opts.types.length || !opts.floorIds.length) { toast('เลือกการทดสอบและชั้นอย่างน้อยอย่างละ 1', 'error'); return false; }
       await db.setMeta('testExportPrefs', opts); await db.setMeta('orgName', opts.org);
@@ -236,13 +241,24 @@ async function exportWordTables(model, opts, prog) {
     const children = [para([run(`ผลการทดสอบ: ${t.label}`, { size: 34, bold: true, color: '1F3A5F' })], { heading: D.HeadingLevel.HEADING_1, after: 120, keepNext: true }),
       para([run(`จำนวน ${tbl.rows.length} จุด`, { size: 26, color: '555555' })], { after: 120 })];
     if (opts.plans) {
+      // location plans on A3 pages (one per floor), the result table stays on A4
       for (const f of model.floors) {
         const sts = tbl.rows.filter(r => model.floorOf(r.station)?.id === f.id);
         if (!sts.length) continue;
-        const items = sts.map(r => ({ d: { shape: 'point', pts: r.station.pts }, no: r.station.code, color: levelColor(r.level) === '#ffffff' ? '#64748b' : levelColor(r.level) }));
-        const c = await planCanvas(f, items, { maxDim: 2600, markerScale: 1.15 });
-        children.push(para([run(`ตำแหน่งจุดทดสอบ ${t.short} — ${f.name}`, { size: 28, bold: true })], { before: 120, after: 60, keepNext: true }));
-        children.push(para([await imgRun(c, CW / 15, (land ? 380 : 560))], { align: D.AlignmentType.CENTER, after: 120 }));
+        const items = sts.map(r => ({ d: { shape: 'point', pts: r.station.pts }, no: codeOf(r.station, t.id), color: levelColor(r.level) === '#ffffff' ? '#64748b' : levelColor(r.level) }));
+        const pl = f.w >= f.h, pw = pl ? 420 : 297, ph = pl ? 297 : 420;
+        const boxMm = [pw - 40, ph - 40 - 24];
+        const c = await planCanvas(f, items, { boxMm, dpi: opts.planDpi || 300, markerScale: 1 });
+        const mmPx = (v) => v / 25.4 * 96;
+        sections.push({
+          properties: { page: { size: { width: 16838, height: 23811, orientation: pl ? D.PageOrientation.LANDSCAPE : D.PageOrientation.PORTRAIT }, margin: { top: M, bottom: M, left: M, right: M } } },
+          headers: { default: header() }, footers: { default: footer() },
+          children: [...(sections.length && sections.at(-1)._type === t.id ? [] : children.splice(0)),
+            para([run(`ตำแหน่งจุดทดสอบ ${t.short} — ${f.name}`, { size: 30, bold: true })], { after: 80, keepNext: true }),
+            para([await imgRun(c, mmPx(boxMm[0]), mmPx(boxMm[1]))], { align: D.AlignmentType.CENTER })],
+          _type: t.id,
+        });
+        c.width = c.height = 0;
       }
     }
     // result table
@@ -283,7 +299,7 @@ async function exportWordTables(model, opts, prog) {
     creator: opts.org || 'Defect Mapper', title: `ผลการทดสอบ ${p.name}`,
     styles: { default: { document: { run: { font: FONTS, size: 28, sizeComplexScript: 28 } } },
       paragraphStyles: [{ id: 'Heading1', name: 'Heading 1', basedOn: 'Normal', next: 'Normal', quickFormat: true, run: { font: FONTS, size: 34, sizeComplexScript: 34, bold: true, boldComplexScript: true, color: '1F3A5F' } }] },
-    sections,
+    sections: sections.map(({ _type, ...s }) => s),
   });
   download(await D.Packer.toBlob(doc), `${base(p)} - ผลทดสอบ.docx`);
   toast('ส่งออกตารางผลทดสอบ (Word) แล้ว', 'ok');

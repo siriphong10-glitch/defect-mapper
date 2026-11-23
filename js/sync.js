@@ -217,7 +217,7 @@ export async function uploadProject(pid) {
   if (!p) return;
   const floors = await db.byProject('floors', pid);
   const defects = await db.byProject('defects', pid);
-  const blobIds = [p.coverBlobId, ...floors.map(f => f.blobId), ...defects.flatMap(d => d.photoIds || [])].filter(Boolean);
+  const blobIds = [p.coverBlobId, ...floors.flatMap(f => [f.blobId, f.srcBlobId]), ...defects.flatMap(d => d.photoIds || [])].filter(Boolean);
   blobIds.forEach(id => enqueue({ t: 'blob', id }));
   enqueue({ t: 'op', op: { kind: 'project', op: 'put', id: p.id, record: p } });
   floors.forEach(f => enqueue({ t: 'op', op: { kind: 'floor', op: 'put', id: f.id, projectId: pid, record: f } }));

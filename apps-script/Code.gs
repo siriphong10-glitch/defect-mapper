@@ -148,7 +148,7 @@ function applyOps_(ops) {
       const pf = load(pid);
       if (pf) {
         const ids = [pf.project && pf.project.coverBlobId];
-        Object.values(pf.floors).forEach(f => ids.push(f.blobId));
+        Object.values(pf.floors).forEach(f => { ids.push(f.blobId); if (f.srcBlobId) ids.push(f.srcBlobId); });
         Object.values(pf.defects).forEach(d => (d.photoIds || []).forEach(x => ids.push(x)));
         const bf = sub_('blobs');
         ids.filter(Boolean).forEach(id => trashByName_(bf, id));

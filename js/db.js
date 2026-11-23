@@ -97,7 +97,9 @@ export const db = {
     const p = await this.get('projects', projectId);
     const floors = await this.byProject('floors', projectId);
     const defects = await this.byProject('defects', projectId);
-    for (const f of floors) { if (f.blobId) await this.rawDel('blobs', f.blobId); await this.rawDel('floors', f.id); }
+    const ids = new Set(floors.flatMap(f => [f.blobId, f.srcBlobId]).filter(Boolean)); // shared by several floors
+    for (const id of ids) await this.rawDel('blobs', id);
+    for (const f of floors) await this.rawDel('floors', f.id);
     for (const d of defects) {
       for (const ph of d.photoIds || []) if (ph) await this.rawDel('blobs', ph);
       await this.rawDel('defects', d.id);
