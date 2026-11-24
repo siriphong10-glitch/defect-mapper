@@ -394,6 +394,7 @@ export async function exportDialog(projectId, initialFmt = 'word') {
       <div class="row" style="flex-wrap:wrap">
         <label class="fld" data-for="word pdf excel"><span>การเรียงลำดับรายการ</span>${sel('sort', [['no', 'ตามเลขลำดับ'], ['floor', 'ตามชั้น แล้วตามเลขลำดับ']], pref('sort', 'no'))}</label>
         <label class="fld" data-for="word pdf image"><span>ความละเอียดแปลน${IS_IOS ? ' (iPad/iPhone จำกัดไว้ประมาณ 280 dpi)' : ''}</span>${sel('planDpi', [[200, '200 dpi (ไฟล์เล็กกว่า)'], [300, '300 dpi (คมที่สุด)']], pref('planDpi', 300))}</label>
+        <label class="fld" data-for="word pdf"><span>ขนาดหน้าแปลนในรายงาน</span>${sel('planPaper', [['A3', 'A3 (แปลนใหญ่ อ่านง่าย)'], ['A4', 'A4 (ทั้งเล่มขนาดเดียวกัน)']], pref('planPaper', 'A3'))}</label>
         <label class="fld" data-for="word pdf image"><span>ขนาดหมุดบนแปลน</span>${sel('marker', [[0.6, 'เล็ก'], [1, 'ปานกลาง'], [1.4, 'ใหญ่'], [1.9, 'ใหญ่มาก']], pref('marker', 1))}</label>
       </div>
       <p class="hint" id="expCount"></p>
@@ -437,7 +438,7 @@ export async function exportDialog(projectId, initialFmt = 'word') {
         const opts = {
           cover: ck('cover'), summary: ck('summary'), plans: ck('plans'), groups: ck('groups'), table: ck('table'), perPoint: ck('perPoint'),
           showUnchecked: ck('showUnchecked'), groupPhotos: +val('groupPhotos'), pointPhotos: +val('pointPhotos'),
-          org: val('org').trim(), marker: +val('marker'), imgHeader: ck('imgHeader'), imgType: val('imgType'), imgPaper: val('imgPaper'), planDpi: +val('planDpi'),
+          org: val('org').trim(), marker: +val('marker'), imgHeader: ck('imgHeader'), imgType: val('imgType'), imgPaper: val('imgPaper'), planPaper: val('planPaper') || 'A3', planDpi: +val('planDpi'),
           xlsSummary: ck('xlsSummary'), xlsCoords: ck('xlsCoords'),
           packAnnotated: ck('packAnnotated'), packPhotos: ck('packPhotos'), packOriginal: ck('packOriginal'),
           sort: val('sort'), floorIds: c.floorIds,
@@ -699,18 +700,20 @@ async function exportWord(projectId, opts, prog = () => {}) {
     for (let i = 0; i < model.perFloor.length; i++) {
       const { floor, items } = model.perFloor[i];
       prog(`กำลังสร้างแปลน ${floor.name}`, 0.1 + 0.4 * i / model.perFloor.length);
-      // plan pages are A3 (landscape or portrait following the plan); everything else stays A4
+      // plan pages are A3 or A4 (chosen in the dialog; orientation follows the plan); everything else stays A4
       const land = floor.w >= floor.h;
-      const pw = land ? 420 : 297, ph = land ? 297 : 420;
-      const boxMm = [pw - 40, ph - 40 - 30];
+      const a4 = opts.planPaper === 'A4';
+      const [lw, sw] = PAPER[a4 ? 'A4' : 'A3'];
+      const pw = land ? lw : sw, ph = land ? sw : lw;
+      const boxMm = [pw - 40, ph - 40 - (a4 ? 26 : 30)];
       const c = await planCanvas(floor, items, { boxMm, dpi: opts.planDpi || 300, markerScale: opts.marker });
       const head = para([run(`แปลน${/^(ชั้น|แปลน)/.test(floor.name) ? '' : ' '}${floor.name.replace(/^แปลน\s*/, '')}`, { size: 34, bold: true, color: '1F3A5F' }), run(`   (${items.length} ตำแหน่ง)`, { size: 28, color: '666666' })],
         { heading: D.HeadingLevel.HEADING_2, after: 120, keepNext: true });
       flush();
-      const A3W = 16838, A3H = 23811;
+      const PGW = a4 ? 11906 : 16838, PGH = a4 ? 16838 : 23811;
       const mmPx = (v) => v / 25.4 * 96;
       sections.push({ ...portrait([head, para([await imgRun(c, mmPx(boxMm[0]), mmPx(boxMm[1]), true)], { align: D.AlignmentType.CENTER, after: 80 }), legendPara()]),
-        properties: { page: { size: { width: A3W, height: A3H, orientation: land ? D.PageOrientation.LANDSCAPE : D.PageOrientation.PORTRAIT }, margin: { top: MARGIN, bottom: MARGIN, left: MARGIN, right: MARGIN } } } });
+        properties: { page: { size: { width: PGW, height: PGH, orientation: land ? D.PageOrientation.LANDSCAPE : D.PageOrientation.PORTRAIT }, margin: { top: MARGIN, bottom: MARGIN, left: MARGIN, right: MARGIN } } } });
     }
   }
 
@@ -788,7 +791,7 @@ function rpCss() {
   return `
   .rp-page{width:${PW}px;height:${PH}px;background:#fff;margin:0 auto 18px;position:relative;box-shadow:0 2px 10px rgba(0,0,0,.35);overflow:hidden;font-family:Sarabun,sans-serif;color:#000;font-size:13.5px;line-height:1.45}
   .rp-page.land{width:${PH}px;height:${PW}px}
-  .rp-page.a3{width:1123px;height:1587px}.rp-page.a3.land{width:1587px;height:1123px}
+  .rp-page.a3{width:1123px;height:1587px}.rp-page.a3.land{width:1587px;height:1123px}.rp-page.a3.pa4{width:794px;height:1123px}.rp-page.a3.pa4.land{width:1123px;height:794px}
   .rp-page.a3 .a3img{position:absolute;inset:0;width:100%;height:100%}
   .rp-page.a3 .rp-foot{bottom:8px}
   .rp-body{position:absolute;left:${PAD}px;right:${PAD}px;top:${PAD + 10}px;bottom:${PAD + 6}px;overflow:hidden}
@@ -814,7 +817,7 @@ function rpCss() {
   .rp-cover img{max-width:520px;max-height:330px;border-radius:6px;margin-bottom:28px;object-fit:cover}
   .rp-cover .info{font-size:16px;line-height:1.9}.rp-cover .org{margin-top:auto;font-size:17px;font-weight:700;color:#1f3a5f}
   @page{size:A4;margin:0}
-  @media print{.rp-page{box-shadow:none;margin:0;page-break-after:always;break-after:page}.rp-page.land{page:land}@page land{size:A4 landscape}.rp-page.a3{page:a3p}.rp-page.a3.land{page:a3l}@page a3p{size:A3 portrait}@page a3l{size:A3 landscape}}
+  @media print{.rp-page{box-shadow:none;margin:0;page-break-after:always;break-after:page}.rp-page.land{page:land}@page land{size:A4 landscape}.rp-page.a3{page:a3p}.rp-page.a3.land{page:a3l}@page a3p{size:A3 portrait}@page a3l{size:A3 landscape}.rp-page.a3.pa4{page:auto}.rp-page.a3.pa4.land{page:land}}
   `;
 }
 
@@ -868,13 +871,13 @@ async function buildPdfBlocks(model, opts, urls, prog) {
     for (let i = 0; i < model.perFloor.length; i++) {
       const { floor, items } = model.perFloor[i];
       prog(`กำลังสร้างแปลน ${floor.name}`, 0.1 + 0.35 * i / model.perFloor.length);
-      const pg = await planPage(floor, items, { paper: 'A3', dpi: opts.planDpi || 300, markerScale: opts.marker, legend: legendOf(model),
+      const pg = await planPage(floor, items, { paper: opts.planPaper === 'A4' ? 'A4' : 'A3', dpi: opts.planDpi || 300, markerScale: opts.marker, legend: legendOf(model),
         title: `แปลน${/^(ชั้น|แปลน)/.test(floor.name) ? '' : ' '}${floor.name.replace(/^แปลน\s*/, '')}`, subtitle: `${p.name} • ${items.length} ตำแหน่ง`, foot: opts.org || '' });
       const blob = await canvasBlob(pg.canvas, 'image/jpeg', 0.93);
       pg.canvas.width = pg.canvas.height = 0;
       const u = URL.createObjectURL(blob);
       urls['plan_' + floor.id] = u;
-      blocks.push({ page: 'a3', land: pg.land, img: u });
+      blocks.push({ page: 'a3', land: pg.land, img: u, paper: pg.paper });
     }
   }
   if (opts.groups) {
@@ -923,8 +926,8 @@ async function paginate(blocks, host, headText) {
   const over = () => body.scrollHeight > body.clientHeight + 1;
   let curKind = null;
   for (const b of blocks) {
-    if (b.page === 'a3') { // full A3 plan page rendered at print resolution
-      const pg = h(`<div class="rp-page a3 ${b.land ? 'land' : ''}"><img class="a3img" src="${b.img}"><div class="rp-foot"></div></div>`);
+    if (b.page === 'a3') { // full plan page (A3 or A4) rendered at print resolution
+      const pg = h(`<div class="rp-page a3 ${b.paper === 'A4' ? 'pa4' : ''} ${b.land ? 'land' : ''}"><img class="a3img" src="${b.img}"><div class="rp-foot"></div></div>`);
       pg.dataset.img = b.img;
       host.appendChild(pg); pages.push(pg);
       await waitImages(pg);
@@ -989,8 +992,9 @@ async function exportPdf(projectId, opts, prog = () => {}) {
         const land = pg.classList.contains('land');
         const a3 = pg.classList.contains('a3');
         const orient = land ? 'landscape' : 'portrait';
-        const fmt = a3 ? 'a3' : 'a4';
-        const [pw, ph] = a3 ? (land ? [420, 297] : [297, 420]) : (land ? [297, 210] : [210, 297]);
+        const big = a3 && !pg.classList.contains('pa4');
+        const fmt = big ? 'a3' : 'a4';
+        const [pw, ph] = big ? (land ? [420, 297] : [297, 420]) : (land ? [297, 210] : [210, 297]);
         let dataUrl;
         if (a3) {
           const pn = $('.rp-foot', pg)?.textContent || '';

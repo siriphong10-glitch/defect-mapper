@@ -112,7 +112,8 @@ export async function exportTestsDialog(projectId) {
       <label class="ck"><input type="checkbox" name="includeEmpty" ${prefs.includeEmpty !== false ? 'checked' : ''}><span>รวมจุดที่ปักตำแหน่งไว้แต่ยังไม่บันทึกค่า</span></label>
       <label class="ck" data-w><input type="checkbox" name="plans" ${prefs.plans !== false ? 'checked' : ''}><span>แปลนตำแหน่งจุดทดสอบ (แยกตามชนิด)</span></label>
       <label class="ck" data-w><input type="checkbox" name="criteria" ${prefs.criteria !== false ? 'checked' : ''}><span>ตารางเกณฑ์ประเมินที่ใช้ และสรุปจำนวนตามผลประเมิน</span></label>
-      <label class="fld" data-w style="margin-top:6px;max-width:300px"><span>ความละเอียดแปลน (หน้า A3)</span><select name="planDpi" class="inp"><option value="200" ${prefs.planDpi == 200 ? 'selected' : ''}>200 dpi (ไฟล์เล็กกว่า)</option><option value="300" ${prefs.planDpi != 200 ? 'selected' : ''}>300 dpi (คมที่สุด)</option></select></label>
+      <label class="fld" data-w style="margin-top:6px;max-width:300px"><span>ความละเอียดแปลน</span><select name="planDpi" class="inp"><option value="200" ${prefs.planDpi == 200 ? 'selected' : ''}>200 dpi (ไฟล์เล็กกว่า)</option><option value="300" ${prefs.planDpi != 200 ? 'selected' : ''}>300 dpi (คมที่สุด)</option></select></label>
+      <label class="fld" data-w style="margin-top:6px;max-width:300px"><span>ขนาดหน้าแปลน</span><select name="planPaper" class="inp"><option value="A3" ${prefs.planPaper !== 'A4' ? 'selected' : ''}>A3 (แปลนใหญ่ อ่านง่าย)</option><option value="A4" ${prefs.planPaper === 'A4' ? 'selected' : ''}>A4 (ทั้งเล่มขนาดเดียวกัน)</option></select></label>
       <label class="fld" data-w style="margin-top:6px"><span>ชื่อหน่วยงานผู้จัดทำ (หัวกระดาษ)</span><input type="text" name="org" value="${esc(org)}"></label>
     </div>
     <div class="fld"><span>ชั้น / แปลน</span><div class="floor-picks">${floors.map(f => `<label class="chip on"><input type="checkbox" name="tfloor" value="${f.id}" checked>${esc(f.name)}</label>`).join('')}</div></div>
@@ -129,7 +130,7 @@ export async function exportTestsDialog(projectId) {
         types: $$('[name=ttype]:checked', b).map(x => x.value),
         floorIds: $$('[name=tfloor]:checked', b).map(x => x.value),
         includeEmpty: $('[name=includeEmpty]', b).checked, plans: $('[name=plans]', b).checked, criteria: $('[name=criteria]', b).checked,
-        org: $('[name=org]', b).value.trim(), planDpi: +$('[name=planDpi]', b).value,
+        org: $('[name=org]', b).value.trim(), planDpi: +$('[name=planDpi]', b).value, planPaper: $('[name=planPaper]', b).value,
       };
       if (!opts.types.length || !opts.floorIds.length) { toast('เลือกการทดสอบและชั้นอย่างน้อยอย่างละ 1', 'error'); return false; }
       await db.setMeta('testExportPrefs', opts); await db.setMeta('orgName', opts.org);
@@ -241,17 +242,19 @@ async function exportWordTables(model, opts, prog) {
     const children = [para([run(`ผลการทดสอบ: ${t.label}`, { size: 34, bold: true, color: '1F3A5F' })], { heading: D.HeadingLevel.HEADING_1, after: 120, keepNext: true }),
       para([run(`จำนวน ${tbl.rows.length} จุด`, { size: 26, color: '555555' })], { after: 120 })];
     if (opts.plans) {
-      // location plans on A3 pages (one per floor), the result table stays on A4
+      // location plans on A3 or A4 pages (one per floor), the result table stays on A4
       for (const f of model.floors) {
         const sts = tbl.rows.filter(r => model.floorOf(r.station)?.id === f.id);
         if (!sts.length) continue;
         const items = sts.map(r => ({ d: { shape: 'point', pts: r.station.pts }, no: codeOf(r.station, t.id), color: levelColor(r.level) === '#ffffff' ? '#64748b' : levelColor(r.level) }));
-        const pl = f.w >= f.h, pw = pl ? 420 : 297, ph = pl ? 297 : 420;
+        const a4 = opts.planPaper === 'A4';
+        const [lw, sw] = a4 ? [297, 210] : [420, 297];
+        const pl = f.w >= f.h, pw = pl ? lw : sw, ph = pl ? sw : lw;
         const boxMm = [pw - 40, ph - 40 - 24];
         const c = await planCanvas(f, items, { boxMm, dpi: opts.planDpi || 300, markerScale: 1 });
         const mmPx = (v) => v / 25.4 * 96;
         sections.push({
-          properties: { page: { size: { width: 16838, height: 23811, orientation: pl ? D.PageOrientation.LANDSCAPE : D.PageOrientation.PORTRAIT }, margin: { top: M, bottom: M, left: M, right: M } } },
+          properties: { page: { size: { width: a4 ? 11906 : 16838, height: a4 ? 16838 : 23811, orientation: pl ? D.PageOrientation.LANDSCAPE : D.PageOrientation.PORTRAIT }, margin: { top: M, bottom: M, left: M, right: M } } },
           headers: { default: header() }, footers: { default: footer() },
           children: [...(sections.length && sections.at(-1)._type === t.id ? [] : children.splice(0)),
             para([run(`ตำแหน่งจุดทดสอบ ${t.short} — ${f.name}`, { size: 30, bold: true })], { after: 80, keepNext: true }),
