@@ -16,6 +16,7 @@ export async function newProject(fields) {
     coverBlobId: fields.coverBlobId || null,
     numbering: fields.numbering,          // 'auto' | 'manual'
     defaultType: fields.defaultType || 'structural',
+    overheadView: fields.overheadView || 'found', // where overhead (soffit) items are presented
     templates: saved ? JSON.parse(JSON.stringify(saved)) : defaultTemplates(),
     testSettings: (await db.getMeta('defaultTestSettings', null)) || undefined,
     floorOrder: [],

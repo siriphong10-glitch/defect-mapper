@@ -7,6 +7,7 @@ import { dropdown, projectDialog, editLogin } from './app.js';
 import * as sync from './sync.js';
 import { prefixFor, nextCode, stationLevel, levelColor, typeDef, settingsOf, allTypes, ensureCodes, stationLabel, typePrefix, codeOf } from './tests.js';
 import { buildTestPanel, stationChips, pickTypeSet, testSettingsEditor } from './test-panel.js';
+import { canOverhead, isOverhead, upperFloor, similarity, overheadView, joinName } from './overhead.js';
 import { renderDashboard, exportDashboardPng } from './dashboard.js';
 import './keypad.js';
 
@@ -21,6 +22,7 @@ const ICON = {
   layers: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M12 3l9 5-9 5-9-5z"/><path d="M3 13l9 5 9-5" opacity=".6"/></svg>',
   flask: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M9 3h6M10 3v6l-5.5 9.5A1.6 1.6 0 0 0 5.9 21h12.2a1.6 1.6 0 0 0 1.4-2.5L14 9V3"/><path d="M7.5 15h9"/></svg>',
   label: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="8"/><path d="M10 9h3v7"/></svg>',
+  up: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 5h18" stroke-dasharray="3 2.4"/><path d="M12 20V9M7.5 13.5 12 9l4.5 4.5"/></svg>',
 };
 const TOOL_HINT = {
   select: 'คลิกเลือกจุด • ลากจุดเพื่อย้าย • ลากพื้นที่ว่างเพื่อเลื่อนแปลน • ล้อเมาส์เพื่อซูม',
@@ -50,6 +52,7 @@ export async function openWorkspace(root, projectId) {
     filter: '', mode: ['test', 'overview'].includes(localStorage.getItem('dm_mode_' + projectId)) ? localStorage.getItem('dm_mode_' + projectId) : 'defect',
     showOther: localStorage.getItem('dm_show_other') !== '0',
     confirm: localStorage.getItem('dm_confirm') !== '0', pending: null,
+    overhead: localStorage.getItem('dm_over') === '1', // new pins are 'overhead' (soffit of the floor above)
   };
   S.floorId = (b.floors[0] || {}).id || null;
   ensureCodes(b.project, S.tests);
@@ -284,6 +287,7 @@ function renderTabs() {
     { label: '↔ ตั้งสเกลแปลน', fn: () => setTool('scale') },
     { label: '🖼 เปลี่ยนรูปแปลน (คงตำแหน่งเดิม)', fn: () => replaceFloorImage(f) },
     { label: '⧉ ทำสำเนาชั้น (ใช้แปลนเดียวกัน เช่น ชั้นทั่วไป)', fn: () => duplicateFloor(f) },
+    { label: '⬆ ชั้นด้านบน / จัดตำแหน่งแปลนให้ตรงกัน', fn: () => alignDialog(f) },
     ...(i > 0 ? [{ label: '↑ ย้ายลำดับขึ้น', fn: () => moveFloor(f, -1) }] : []),
     ...(i < S.floors.length - 1 ? [{ label: '↓ ย้ายลำดับลง', fn: () => moveFloor(f, 1) }] : []),
     '-',
@@ -390,6 +394,7 @@ async function duplicateFloor(f) {
   const name = await promptBox('ทำสำเนาชั้น (ใช้แปลนเดียวกัน)', `${f.name} (สำเนา)`, { label: 'ชื่อชั้นใหม่ เช่น ชั้น 5' });
   if (!name) return;
   const nf = { ...f, id: uid(), name, createdAt: Date.now() }; // same picture/PDF and scale, no points copied
+  delete nf.upId; delete nf.upAlign; // a new level has its own floor above
   await db.put('floors', nf);
   const i = S.floors.indexOf(f);
   S.floors.splice(i + 1, 0, nf);
@@ -397,6 +402,133 @@ async function duplicateFloor(f) {
   await touch(P());
   await selectFloor(nf.id);
   toast(`สร้าง “${name}” แล้ว — ใช้แปลนเดียวกับ “${f.name}” (ไม่เปลืองพื้นที่เพิ่ม)`, 'ok', 3500);
+}
+
+// ---------------------------------------------------------------- floor above + plan alignment
+// small pan/zoom plan viewer used to pick reference points
+function miniPlan(host, url, floor, onPick) {
+  host.innerHTML = `<div class="al-view"><div class="al-stage" style="width:${floor.w}px;height:${floor.h}px"><img src="${url}" draggable="false" alt="">
+    <svg viewBox="0 0 ${floor.w} ${floor.h}" width="${floor.w}" height="${floor.h}"></svg></div>
+    <div class="al-zoom"><button type="button" data-z="in" title="ซูมเข้า">＋</button><button type="button" data-z="out" title="ซูมออก">－</button><button type="button" data-z="fit" title="พอดีกรอบ">⤢</button></div></div>`;
+  const view = $('.al-view', host), stage = $('.al-stage', host), svg = $('svg', host);
+  const v = { s: 1, tx: 0, ty: 0 };
+  let marks = [];
+  const apply = () => { stage.style.transform = `translate(${v.tx}px,${v.ty}px) scale(${v.s})`; draw(); };
+  const fit = () => { const W = view.clientWidth, H = view.clientHeight; v.s = Math.min(W / floor.w, H / floor.h) * 0.96; v.tx = (W - floor.w * v.s) / 2; v.ty = (H - floor.h * v.s) / 2; apply(); };
+  const zoomAt = (f, cx, cy) => { const ns = Math.max(0.02, Math.min(8, v.s * f)); v.tx = cx - (cx - v.tx) * ns / v.s; v.ty = cy - (cy - v.ty) * ns / v.s; v.s = ns; apply(); };
+  const draw = () => {
+    const k = 1 / v.s;
+    svg.innerHTML = marks.map(m => { const [x, y] = m.pt, r = 11 * k;
+      return `<g><circle cx="${x}" cy="${y}" r="${r}" fill="none" stroke="#fff" stroke-width="${5 * k}"/><circle cx="${x}" cy="${y}" r="${r}" fill="none" stroke="${m.color}" stroke-width="${2.5 * k}"/>
+        <path d="M${x - 18 * k} ${y}H${x - 4 * k}M${x + 4 * k} ${y}H${x + 18 * k}M${x} ${y - 18 * k}V${y - 4 * k}M${x} ${y + 4 * k}V${y + 18 * k}" stroke="${m.color}" stroke-width="${2 * k}"/>
+        <text x="${x + 14 * k}" y="${y - 14 * k}" font-size="${14 * k}" font-weight="700" fill="${m.color}" stroke="#fff" stroke-width="${3 * k}" paint-order="stroke" font-family="Sarabun, sans-serif">${esc(m.label)}</text></g>`; }).join('');
+  };
+  $$('[data-z]', host).forEach(b => b.onclick = (e) => { e.stopPropagation(); const W = view.clientWidth / 2, H = view.clientHeight / 2; b.dataset.z === 'fit' ? fit() : zoomAt(b.dataset.z === 'in' ? 1.5 : 1 / 1.5, W, H); });
+  view.addEventListener('wheel', (e) => { e.preventDefault(); const r = view.getBoundingClientRect(); zoomAt(e.deltaY < 0 ? 1.2 : 1 / 1.2, e.clientX - r.left, e.clientY - r.top); }, { passive: false });
+  const ptrs = new Map(); let moved = false, last = null, pinch = null;
+  view.addEventListener('pointerdown', (e) => {
+    if (e.target.closest('.al-zoom')) return;
+    view.setPointerCapture(e.pointerId); ptrs.set(e.pointerId, [e.clientX, e.clientY]);
+    if (ptrs.size === 1) { moved = false; last = [e.clientX, e.clientY]; }
+    if (ptrs.size === 2) { const [a, b] = [...ptrs.values()]; pinch = { d: Math.hypot(a[0] - b[0], a[1] - b[1]) }; moved = true; }
+  });
+  view.addEventListener('pointermove', (e) => {
+    if (!ptrs.has(e.pointerId)) return;
+    ptrs.set(e.pointerId, [e.clientX, e.clientY]);
+    const r = view.getBoundingClientRect();
+    if (ptrs.size === 2 && pinch) {
+      const [a, b] = [...ptrs.values()]; const d = Math.hypot(a[0] - b[0], a[1] - b[1]);
+      zoomAt(d / pinch.d, (a[0] + b[0]) / 2 - r.left, (a[1] + b[1]) / 2 - r.top); pinch.d = d; return;
+    }
+    const dx = e.clientX - last[0], dy = e.clientY - last[1];
+    if (!moved && Math.hypot(dx, dy) < 5) return;
+    moved = true; v.tx += dx; v.ty += dy; last = [e.clientX, e.clientY]; apply();
+  });
+  const up = (e) => {
+    if (!ptrs.has(e.pointerId)) return;
+    ptrs.delete(e.pointerId);
+    if (ptrs.size < 2) pinch = null;
+    if (!ptrs.size && !moved) {
+      const r = view.getBoundingClientRect();
+      const x = (e.clientX - r.left - v.tx) / v.s, y = (e.clientY - r.top - v.ty) / v.s;
+      if (x >= 0 && y >= 0 && x <= floor.w && y <= floor.h) onPick([x, y]);
+    }
+    if (ptrs.size === 1) { last = [...ptrs.values()][0]; }
+  };
+  view.addEventListener('pointerup', up); view.addEventListener('pointercancel', up);
+  requestAnimationFrame(fit);
+  return { setMarks: (m) => { marks = m; draw(); }, fit };
+}
+
+async function alignDialog(f) {
+  const natural = (() => { const i = S.floors.indexOf(f); return S.floors[i + 1] || null; })();
+  let upId = upperFloor(S.floors, f)?.id || '';
+  const al = f.upAlign && f.upAlign.pairs?.length === 2 ? f.upAlign : null;
+  let pairs = al && al.floorId === upId ? JSON.parse(JSON.stringify(al.pairs)) : [[null, null], [null, null]];
+  let active = 0; // 0,1 = reference point being placed, 2 = test
+  let testPt = null;
+  const others = S.floors.filter(x => x.id !== f.id);
+  const body = h(`<div>
+    <p class="hint" style="margin:0 0 10px">ตำแหน่ง “เหนือศีรษะ” ที่ปักในชั้นนี้ คือท้องพื้น/ท้องคานของชั้นด้านบน ถ้าตั้งค่าโครงการให้แสดงเป็นของชั้นโครงสร้าง โปรแกรมจะย้ายจุดไปแสดงบนแปลนชั้นด้านบน
+      จึงต้องรู้ว่าตำแหน่งบนสองแปลนตรงกันอย่างไร</p>
+    <div class="row" style="align-items:flex-end;flex-wrap:wrap;gap:10px">
+      <label class="fld" style="min-width:220px"><span>ชั้นด้านบนของ “${esc(f.name)}”</span><select class="inp" id="alUp">
+        ${others.length ? others.map(x => `<option value="${x.id}" ${x.id === upId ? 'selected' : ''}>${esc(x.name)}${x === natural ? ' (ชั้นถัดไปในรายการ)' : ''}</option>`).join('') : '<option value="">— ยังไม่มีชั้นอื่น —</option>'}</select></label>
+      <div class="fld"><span>จุดอ้างอิง (เลือกจุดเดียวกันบนทั้งสองแปลน เช่น จุดตัดกริดมุมอาคาร ให้อยู่ห่างกัน)</span>
+        <div class="seg" id="alStep"><button data-s="0">จุดที่ 1</button><button data-s="1">จุดที่ 2</button><button data-s="2">ทดสอบ</button></div></div>
+      <button class="btn sm ghost" id="alClear" type="button">ล้างจุดอ้างอิง</button>
+    </div>
+    <div class="al-grid"><div><div class="al-cap">แปลน${esc(f.name.replace(/^แปลน\s*/, ''))} (ชั้นที่พบ)</div><div id="alL"></div></div>
+      <div><div class="al-cap" id="alUpCap"></div><div id="alR"></div></div></div>
+    <p class="hint" id="alMsg" style="margin:8px 0 0"></p>
+  </div>`);
+  const m = modal({ title: 'ชั้นด้านบน / จัดตำแหน่งแปลนให้ตรงกัน', body, wide: true, actions: [
+    { label: 'ยกเลิก', value: null },
+    { label: 'บันทึก', kind: 'primary', onClick: async () => {
+      const done = pairs.every(p => p[0] && p[1]);
+      const any = pairs.some(p => p[0] || p[1]);
+      if (any && !done) { toast('จุดอ้างอิงยังไม่ครบ 2 คู่ — เลือกให้ครบ หรือกด “ล้างจุดอ้างอิง”', 'error'); return false; }
+      if (done && !similarity(pairs)) { toast('จุดอ้างอิงทั้งสองอยู่ตำแหน่งเดียวกัน — เลือกจุดที่ห่างกัน', 'error'); return false; }
+      if (upId && upId !== natural?.id) f.upId = upId; else delete f.upId;
+      if (done && upId) f.upAlign = { floorId: upId, pairs }; else delete f.upAlign;
+      await db.put('floors', f); await touch(P());
+      toast(done ? 'บันทึกชั้นด้านบนและจุดอ้างอิงแล้ว' : 'บันทึกชั้นด้านบนแล้ว (ไม่มีจุดอ้างอิง — ถือว่าสองแปลนใช้กรอบแบบเดียวกัน)', 'ok', 3500);
+      renderRight(true);
+    } },
+  ] });
+  let L = null, R = null;
+  const COLORS = ['#e11d48', '#2563eb'];
+  const mapPt = (pt) => { const T = similarity(pairs); return T ? [T.a * pt[0] - T.b * pt[1] + T.tx, T.b * pt[0] + T.a * pt[1] + T.ty] : null; };
+  const refresh = () => {
+    $$('#alStep [data-s]', body).forEach(b => { b.classList.toggle('on', +b.dataset.s === active); b.disabled = b.dataset.s === '2' && !pairs.every(p => p[0] && p[1]); });
+    const mk = (side) => pairs.flatMap((p, i) => p[side] ? [{ pt: p[side], label: String(i + 1), color: COLORS[i] }] : []);
+    const lm = mk(0), rm = mk(1);
+    if (active === 2 && testPt) { lm.push({ pt: testPt, label: 'ทดสอบ', color: '#0f766e' }); const q = mapPt(testPt); if (q) rm.push({ pt: q, label: 'ทดสอบ', color: '#0f766e' }); }
+    L?.setMarks(lm); R?.setMarks(rm);
+    const T = pairs.every(p => p[0] && p[1]) ? similarity(pairs) : null;
+    $('#alMsg', body).innerHTML = active === 2 ? 'คลิกตำแหน่งใดก็ได้บนแปลนซ้าย แล้วดูว่าจุด “ทดสอบ” บนแปลนขวาตรงตำแหน่งเดียวกันหรือไม่'
+      : T ? `จับคู่ครบแล้ว — มาตราส่วนชั้นบน/ชั้นนี้ ${T.scale.toFixed(3)} เท่า, หมุน ${T.rot.toFixed(1)}° • กด “ทดสอบ” เพื่อตรวจ หรือ “บันทึก”`
+      : `คลิกจุดที่ ${active + 1} บนแปลน${pairs[active][0] ? 'ขวา (ชั้นด้านบน)' : 'ซ้าย (ชั้นนี้)'} • เลื่อนแปลนด้วยการลาก ซูมด้วยล้อเมาส์/สองนิ้ว • ถ้าไม่ใส่จุดอ้างอิง โปรแกรมถือว่าสองแปลนใช้กรอบแบบเดียวกัน`;
+  };
+  const pick = (side) => (pt) => {
+    if (!canEdit()) return;
+    if (active === 2) { if (side === 0) { testPt = pt; refresh(); } return; }
+    pairs[active][side] = pt;
+    if (pairs[active][0] && pairs[active][1] && active === 0 && !(pairs[1][0] && pairs[1][1])) active = 1;
+    refresh();
+  };
+  const loadUp = async () => {
+    const uf = S.floors.find(x => x.id === upId);
+    $('#alUpCap', body).textContent = uf ? `${uf.name} (ชั้นด้านบน)` : '';
+    if (uf) R = miniPlan($('#alR', body), await blobUrl(uf.blobId), uf, pick(1)); else { $('#alR', body).innerHTML = '<p class="muted">ยังไม่มีชั้นด้านบน</p>'; R = null; }
+    refresh();
+  };
+  L = miniPlan($('#alL', body), await blobUrl(f.blobId), f, pick(0));
+  $('#alUp', body).onchange = (e) => { upId = e.target.value; pairs = (al && al.floorId === upId) ? JSON.parse(JSON.stringify(al.pairs)) : [[null, null], [null, null]]; active = 0; testPt = null; loadUp(); };
+  $$('#alStep [data-s]', body).forEach(b => b.onclick = () => { active = +b.dataset.s; refresh(); });
+  $('#alClear', body).onclick = () => { pairs = [[null, null], [null, null]]; active = 0; testPt = null; refresh(); };
+  await loadUp();
+  return m;
 }
 
 async function fileToPlanImages(file, onProgress, onlyPage = null) {
@@ -508,7 +640,7 @@ function renderList() {
     const tpl = tplOf(d);
     const col = defectColor(P(), d);
     const elf = fieldByRole(tpl, 'element'), sf = fieldByRole(tpl, 'severity');
-    const meta = [elf && d.data?.[elf.key], sf && d.data?.[sf.key], d.photoIds?.length ? `📷 ${d.photoIds.length}` : ''].filter(Boolean).join(' • ');
+    const meta = [isOverhead(d) ? '⬆ เหนือศีรษะ' : '', elf && d.data?.[elf.key], sf && d.data?.[sf.key], d.photoIds?.length ? `📷 ${d.photoIds.length}` : ''].filter(Boolean).join(' • ');
     const it = h(`<div class="ditem ${d.id === S.selectedId ? 'on' : ''}">
       <span class="badge ${d.shape !== 'point' ? 'area' : ''}" style="background:${col};color:${textOn(col)}">${esc(d.no)}</span>
       <div class="txt"><div class="t1">${esc(defectTitle(P(), d))}</div><div class="t2">${esc(meta || TYPE_LABELS[d.type])}</div></div></div>`);
@@ -530,7 +662,7 @@ function renderTestList() {
   box.innerHTML = '';
   for (const d of list) {
     const lv = stationLevel(P(), d);
-    const meta = [d.element, d.place, d.role === 'baseline' ? 'จุดอ้างอิง' : d.role === 'targeted' ? 'จุดเจาะจง' : ''].filter(Boolean).join(' • ');
+    const meta = [isOverhead(d) ? '⬆ เหนือศีรษะ' : '', d.element, d.place, d.role === 'baseline' ? 'จุดอ้างอิง' : d.role === 'targeted' ? 'จุดเจาะจง' : ''].filter(Boolean).join(' • ');
     const it = h(`<div class="ditem ${d.id === S.selectedId ? 'on' : ''}">
       <span class="badge tbadge" style="background:${levelColor(lv)};color:${lv === 'none' ? 'var(--ink)' : '#fff'}">◆</span>
       <div class="txt"><div class="t1">${esc(stationLabel(d))}${meta ? ` <span class="t2" style="font-weight:400">${esc(meta)}</span>` : ''}</div><div class="tchips">${stationChips(P(), d)}</div></div></div>`);
@@ -560,6 +692,7 @@ function renderTools() {
     return;
   }
   const common = `
+    <button class="tool ${S.overhead ? 'on' : ''}" id="tOver" title="เมื่อเปิด จุดใหม่จะเป็นตำแหน่งเหนือศีรษะ (ท้องพื้น/ท้องคานของชั้นถัดไป) — ใช้กับความเสียหายโครงสร้างและจุดทดสอบ">${ICON.up}<span>เหนือศีรษะ</span><kbd>U</kbd></button>
     <button class="tool ${S.confirm ? 'on' : ''}" id="tConfirm" title="ให้กดยืนยันก่อนปักทุกครั้ง (กันกดผิด)">${ICON.check}<span>ยืนยันก่อนปัก</span><kbd>K</kbd></button>
     <button class="tool ${S.showOther ? 'on' : ''}" id="tOther" title="แสดงจุดของอีกชั้นข้อมูลแบบจาง ๆ">${ICON.layers}<span>${isTest() ? 'แสดงความเสียหาย' : 'แสดงจุดทดสอบ'}</span><kbd>O</kbd></button>`;
   if (isTest()) {
@@ -595,6 +728,7 @@ function renderTools() {
   $$('[data-tool]', bar).forEach(b => b.onclick = () => setTool(b.dataset.tool));
   if ($('#tCopy')) $('#tCopy').onclick = () => { S.copyPrev = !S.copyPrev; renderTools(); };
   $('#tConfirm').onclick = toggleConfirm;
+  $('#tOver').onclick = toggleOverhead;
   $('#tOther').onclick = toggleOther;
   $('#tLabels').onclick = () => { S.showLabels = !S.showLabels; renderTools(); renderPins(); };
   $('#zIn').onclick = () => zoomAt(1.25);
@@ -604,6 +738,15 @@ function renderTools() {
 }
 
 function toggleConfirm() { S.confirm = !S.confirm; try { localStorage.setItem('dm_confirm', S.confirm ? '1' : '0'); } catch { /* */ } renderTools(); toast(S.confirm ? 'เปิด: ต้องกดยืนยันก่อนปักทุกครั้ง' : 'ปิด: ปักทันทีเมื่อคลิก'); }
+function toggleOverhead() {
+  S.overhead = !S.overhead;
+  try { localStorage.setItem('dm_over', S.overhead ? '1' : '0'); } catch { /* */ }
+  renderTools(); updateHint();
+  if (!S.overhead) { toast('ปิด: จุดใหม่อยู่ในพื้นที่ชั้นนี้'); return; }
+  const up = upperFloor(S.floors, S.floors.find(f => f.id === S.floorId));
+  toast(up ? `เปิด: จุดใหม่เป็นตำแหน่งเหนือศีรษะ (${joinName('โครงสร้าง', up.name)})${isTest() ? '' : ' • ใช้กับความเสียหายแบบตรวจสอบโครงสร้าง'}`
+    : 'เปิด: จุดใหม่เป็นตำแหน่งเหนือศีรษะ — แต่ชั้นนี้ยังไม่มีชั้นด้านบนในโครงการ', up ? 'ok' : 'error', 4000);
+}
 function toggleOther() { S.showOther = !S.showOther; try { localStorage.setItem('dm_show_other', S.showOther ? '1' : '0'); } catch { /* */ } renderTools(); renderPins(); }
 
 function setTool(t) {
@@ -630,6 +773,7 @@ function updateHint() {
     t = `คลิกบนแปลนเพื่อปักจุดทดสอบ (${ids.map(id => typeDef(P(), id)?.short).filter(Boolean).join(' + ')})  •  รหัสถัดไป: ${nx.join(' / ')}`;
   } else if (['point', 'area', 'rect'].includes(S.tool)) t += `  •  เลขถัดไป: ${suggestNo(P(), S.defects)}`;
   if (S.confirm && ['point', 'area', 'rect'].includes(S.tool)) t += '  •  ต้องกดยืนยันก่อนปัก';
+  if (S.overhead && ['point', 'area', 'rect'].includes(S.tool)) t += '  •  ⬆ จุดใหม่เป็นตำแหน่งเหนือศีรษะ';
   hint.textContent = t;
   hint.style.display = '';
 }
@@ -728,10 +872,11 @@ function svgEl(tag, attrs = {}, parent) {
   return e;
 }
 
-function badge(parent, x, y, text, color, k, square, selectedFlag) {
+function badge(parent, x, y, text, color, k, square, selectedFlag, over) {
   const fs = 12 * k;
   const w = Math.max(24, 9 + String(text).length * 7.4) * k, hh = 24 * k;
   const g = svgEl('g', { class: 'pin' }, parent);
+  if (over) svgEl('rect', { x: x - w / 2 - 5 * k, y: y - hh / 2 - 5 * k, width: w + 10 * k, height: hh + 10 * k, rx: square ? 8 * k : (hh + 10 * k) / 2, fill: 'rgba(255,255,255,.7)', stroke: '#1f3a5f', 'stroke-width': 1.8 * k, 'stroke-dasharray': `${4 * k} ${3 * k}` }, g);
   if (selectedFlag) svgEl('rect', { x: x - w / 2 - 4 * k, y: y - hh / 2 - 4 * k, width: w + 8 * k, height: hh + 8 * k, rx: square ? 7 * k : (hh + 8 * k) / 2, fill: 'none', stroke: '#1f3a5f', 'stroke-width': 2.5 * k }, g);
   svgEl('rect', { x: x - w / 2, y: y - hh / 2, width: w, height: hh, rx: square ? 5 * k : hh / 2, fill: color, stroke: '#fff', 'stroke-width': 2 * k, style: 'filter:drop-shadow(0 1px 1.5px rgba(0,0,0,.45))' }, g);
   if (S.showLabels) {
@@ -767,6 +912,7 @@ function drawTests(layer, list, k, interactive) {
     const sel = interactive && d.id === S.selectedId;
     const g = svgEl('g', interactive ? { 'data-id': d.id, style: 'cursor:pointer' } : {}, layer);
     const r = 9 * k;
+    if (isOverhead(d)) svgEl('circle', { cx: x, cy: y, r: r * 1.95, fill: 'rgba(255,255,255,.7)', stroke: '#1f3a5f', 'stroke-width': 1.8 * k, 'stroke-dasharray': `${4 * k} ${3 * k}` }, g);
     if (sel) svgEl('rect', { x: x - r - 5 * k, y: y - r - 5 * k, width: 2 * r + 10 * k, height: 2 * r + 10 * k, transform: `rotate(45 ${x} ${y})`, fill: 'none', stroke: '#1f3a5f', 'stroke-width': 2.5 * k }, g);
     svgEl('rect', { x: x - r, y: y - r, width: 2 * r, height: 2 * r, transform: `rotate(45 ${x} ${y})`, fill: col, stroke: lv === 'none' ? '#1f3a5f' : '#fff', 'stroke-width': 2 * k, style: 'filter:drop-shadow(0 1px 1.5px rgba(0,0,0,.45))' }, g);
     if (S.showLabels) {
@@ -790,12 +936,12 @@ function drawDefects(layer, list, k, interactive) {
       const g = svgEl('g', interactive ? { 'data-id': d.id, style: 'cursor:pointer' } : {}, layer);
       if (isPt) {
         const [x, y] = d.pts[0];
-        badge(g, x, y, d.no, col, k, false, sel);
+        badge(g, x, y, d.no, col, k, false, sel, isOverhead(d));
       } else {
         svgEl('polygon', { points: d.pts.map(p => p.join(',')).join(' '), fill: col, 'fill-opacity': sel ? 0.38 : 0.26,
           stroke: col, 'stroke-width': (sel ? 3 : 2) * k, 'stroke-dasharray': sel ? `${8 * k} ${4 * k}` : '', 'stroke-linejoin': 'round' }, g);
         const [cx, cy] = centroid(d.pts);
-        badge(g, cx, cy, d.no, col, k, true, sel);
+        badge(g, cx, cy, d.no, col, k, true, sel, isOverhead(d));
         if (sel && S.tool === 'select') {
           d.pts.forEach((p, i) => svgEl('circle', { cx: p[0], cy: p[1], r: 6 * k, fill: '#fff', stroke: '#1f3a5f', 'stroke-width': 2 * k, 'data-vertex': i, 'data-id': d.id, style: 'cursor:move' }, layer));
         }
@@ -1023,6 +1169,7 @@ function onKey(e) {
   const k = e.key.toLowerCase();
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   if (k === 'k') toggleConfirm();
+  else if (k === 'u') toggleOverhead();
   else if (k === 'o') toggleOther();
   else if (k === 't' && isTest()) $('#tSet')?.click();
   else if (k === 'v') setTool('select');
@@ -1095,6 +1242,7 @@ async function createTest(pts) {
   ids.forEach(id => { tests[id] = {}; codes[id] = nextCode(p, S.tests, typePrefix(p, id), Object.values(codes)); });
   const d = { id: uid(), projectId: p.id, floorId: S.floorId, layer: 'test', shape: 'point', pts,
     code: codes[ids[0]], codes, role: '', element: '', place: '', tests, photoIds: [], createdAt: Date.now(), createdBy };
+  if (S.overhead) d.pos = 'above';
   await db.put('defects', d);
   S.tests.push(d);
   await touch(p);
@@ -1114,6 +1262,7 @@ async function createDefect(shape, pts) {
     type: p.defaultType || 'structural', data: {}, photoIds: [], createdAt: Date.now(), createdBy,
   };
   if (S.copyPrev && prev) { d.type = prev.type; d.data = JSON.parse(JSON.stringify(prev.data || {})); }
+  if (S.overhead && canOverhead(d)) d.pos = 'above';
   await db.put('defects', d);
   S.defects.push(d);
   S.lastCreatedId = d.id;
@@ -1168,6 +1317,7 @@ function renderRight(keepScroll = false) {
       onClose: () => select(null),
       onCodeChange: () => { renderList(); renderPins(); updateHint(); },
     });
+    mountPosSeg(box, d, $('#roleSeg', box)?.closest('.fld'));
     renderPhotos(d);
     if (scroll) $('.rbody', box).scrollTop = scroll;
     return;
@@ -1250,10 +1400,31 @@ function renderRight(keepScroll = false) {
     noIn.onblur = () => { if ($('#noErr').textContent) { noIn.value = d.no; $('#noErr').textContent = ''; $('#noWrap').classList.remove('invalid'); } };
   }
 
+  if (canOverhead(d)) mountPosSeg(box, d, $('[data-type]', box)?.closest('.fld'));
   renderFields($('#fields'), d, tpl);
   renderPhotos(d);
   if (!canEdit()) $$('input, select, textarea, .seg button, #useArea, .listed button, #fields .btn', $('.rbody', box)).forEach(x => { x.disabled = true; });
   if (scroll) $('.rbody', box).scrollTop = scroll;
+}
+
+// "in the floor" vs "overhead (structure of the floor above)" picker, inserted after `after`
+function mountPosSeg(box, d, after) {
+  if (!after) return;
+  const found = S.floors.find(f => f.id === d.floorId);
+  const up = upperFloor(S.floors, found);
+  const el = h(`<div class="fld"><span>ตำแหน่งที่พบ</span>
+    <div class="seg" id="posSeg"><button data-pos="" class="${d.pos !== 'above' ? 'on' : ''}">ในพื้นที่ชั้น</button><button data-pos="above" class="${d.pos === 'above' ? 'on' : ''}">⬆ เหนือศีรษะ</button></div>
+    ${d.pos === 'above' ? `<span class="hint">${up ? `ท้องพื้น/ท้องคาน = ${esc(joinName('โครงสร้าง', up.name))} • ${esc(joinName('ในรายงานแสดงที่', overheadView(P()) === 'structure' ? up.name : (found?.name || 'ชั้นที่พบ')))} (ตั้งค่าได้ที่ “แก้ไขข้อมูลโครงการ”)` : '⚠ ชั้นนี้ยังไม่มีชั้นด้านบนในโครงการ — จะแสดงในชั้นที่พบ'}</span>` : ''}</div>`);
+  after.after(el);
+  $$('[data-pos]', el).forEach(b => b.onclick = async () => {
+    if (!canEdit()) return;
+    const v = b.dataset.pos;
+    if ((d.pos || '') === v) return;
+    if (v) d.pos = v; else delete d.pos;
+    await db.put('defects', d); touch(P());
+    renderRight(true); renderList(); renderPins();
+  });
+  if (!canEdit()) $$('button', el).forEach(x => { x.disabled = true; });
 }
 
 function renderFields(box, d, tpl) {

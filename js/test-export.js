@@ -2,6 +2,7 @@
 import { db } from './db.js';
 import { $, $$, esc, h, modal, toast, download, loadScript, naturalCmp, safeName } from './utils.js';
 import { loadBundle } from './project.js';
+import { presentItems, positionNote, overheadLegend } from './overhead.js';
 import { allTypes, typeDef, evalTest, LEVEL, levelColor, ROLES, fieldValueText, ensureCodes, codeOf } from './tests.js';
 
 const HEAD_FILL = 'C5D9F1';
@@ -9,9 +10,10 @@ const DEFAULT_ORG = 'บริษัท เพอร์ฟอร์มแมก�
 
 // ------------------------------------------------------------------ model
 export async function buildTestModel(projectId, floorIds = null) {
-  const { project, floors, tests } = await loadBundle(projectId);
+  const { project, floors, tests: raw } = await loadBundle(projectId);
   const fl = floorIds ? floors.filter(f => floorIds.includes(f.id)) : floors;
-  ensureCodes(project, tests);
+  ensureCodes(project, raw);
+  const tests = presentItems(project, floors, raw); // overhead stations may move to the floor above
   const fo = new Map(fl.map((f, i) => [f.id, i]));
   const stations = tests.filter(s => fo.has(s.floorId))
     .sort((a, b) => fo.get(a.floorId) - fo.get(b.floorId) || naturalCmp(a.code, b.code));
@@ -49,7 +51,7 @@ export function typeTable(model, t, { split = false, includeEmpty = true } = {})
     if (!includeEmpty && !e.recorded) return;
     const v = s.tests[t.id];
     const cells = {
-      _n: ++n, _code: codeOf(s, t.id), _with: Object.keys(s.tests).filter(k => k !== t.id).map(k => codeOf(s, k)).join(', '), _floor: model.floorOf(s)?.name || '', _place: s.place || '', _el: s.element || '', _role: ROLES[s.role || ''] === '—' ? '' : ROLES[s.role || ''],
+      _n: ++n, _code: codeOf(s, t.id), _with: Object.keys(s.tests).filter(k => k !== t.id).map(k => codeOf(s, k)).join(', '), _floor: (model.floorOf(s)?.name || '') + (s._over ? ` — ${positionNote(s)}` : ''), _place: s.place || '', _el: s.element || '', _role: ROLES[s.role || ''] === '—' ? '' : ROLES[s.role || ''],
       _grade: e.grade || (e.recorded ? '' : 'ยังไม่บันทึกค่า'), _linked: s.linked || '', _note: s.note || '',
     };
     t.fields.forEach(f => {
@@ -246,7 +248,7 @@ async function exportWordTables(model, opts, prog) {
       for (const f of model.floors) {
         const sts = tbl.rows.filter(r => model.floorOf(r.station)?.id === f.id);
         if (!sts.length) continue;
-        const items = sts.map(r => ({ d: { shape: 'point', pts: r.station.pts }, no: codeOf(r.station, t.id), color: levelColor(r.level) === '#ffffff' ? '#64748b' : levelColor(r.level) }));
+        const items = sts.map(r => ({ d: { shape: 'point', pts: r.station.pts }, over: r.station._over, no: codeOf(r.station, t.id), color: levelColor(r.level) === '#ffffff' ? '#64748b' : levelColor(r.level) }));
         const a4 = opts.planPaper === 'A4';
         const [lw, sw] = a4 ? [297, 210] : [420, 297];
         const pl = f.w >= f.h, pw = pl ? lw : sw, ph = pl ? sw : lw;
@@ -258,7 +260,8 @@ async function exportWordTables(model, opts, prog) {
           headers: { default: header() }, footers: { default: footer() },
           children: [...(sections.length && sections.at(-1)._type === t.id ? [] : children.splice(0)),
             para([run(`ตำแหน่งจุดทดสอบ ${t.short} — ${f.name}`, { size: 30, bold: true })], { after: 80, keepNext: true }),
-            para([await imgRun(c, mmPx(boxMm[0]), mmPx(boxMm[1]))], { align: D.AlignmentType.CENTER })],
+            para([await imgRun(c, mmPx(boxMm[0]), mmPx(boxMm[1]))], { align: D.AlignmentType.CENTER }),
+            ...(items.some(i => i.over) ? [para([run(overheadLegend(model.project, items), { size: 22, color: '555555' })], { align: D.AlignmentType.CENTER })] : [])],
           _type: t.id,
         });
         c.width = c.height = 0;
@@ -309,7 +312,8 @@ async function exportWordTables(model, opts, prog) {
 }
 
 // ------------------------------------------------------------------ for the data pack (report.json)
-export function testsReport(project, floors, stations) {
+export function testsReport(project, floors, stationsRaw) {
+  const stations = presentItems(project, floors, stationsRaw);
   const model = { project, floors, stations, floorOf: (s) => floors.find(f => f.id === s.floorId) };
   const types = allTypes(project, { includeHidden: true }).filter(t => stations.some(s => s.tests?.[t.id]));
   return types.map(t => {

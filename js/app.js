@@ -232,6 +232,13 @@ export async function projectDialog(existing = null, onSaved = null) {
       </div>
       <span class="err" id="numErr"></span>
     </div>
+    <div class="fld"><span>การแสดงตำแหน่งเหนือศีรษะ (ท้องพื้น/ท้องคานของชั้นถัดไป) ในรายงาน แปลนที่ส่งออก และหน้าภาพรวม</span>
+      <div class="num-choice">
+        <label><input type="radio" name="overheadView" value="found" ${p.overheadView !== 'structure' ? 'checked' : ''}><b>แสดงในชั้นที่พบ</b><span class="hint">เช่น ท้องพื้นที่มองเห็นจากชั้น 3 แสดงในแปลนชั้น 3 (มีกรอบเส้นประบอกว่าเป็นเหนือศีรษะ) เหมาะกับการเดินตามรอยหน้างาน</span></label>
+        <label><input type="radio" name="overheadView" value="structure" ${p.overheadView === 'structure' ? 'checked' : ''}><b>แสดงเป็นของชั้นที่โครงสร้างนั้นรองรับ</b><span class="hint">ท้องพื้นที่มองเห็นจากชั้น 3 ย้ายไปแสดงในแปลนชั้น 4 เหมาะกับการสรุปความเสียหายรายพื้น/คาน เพื่อประเมินและออกแบบงานซ่อม</span></label>
+      </div>
+      <span class="hint">ใช้กับความเสียหายแบบตรวจสอบโครงสร้างและจุดทดสอบเท่านั้น (ฝ้าในงานตรวจสอบทั่วไปเป็นของชั้นนั้นเสมอ) • เปลี่ยนเมื่อไรก็ได้ ข้อมูลที่บันทึกไว้ไม่เปลี่ยน</span>
+    </div>
   </div>`);
 
   let accent = p.accent;
@@ -266,7 +273,7 @@ export async function projectDialog(existing = null, onSaved = null) {
         const numbering = $('[name=numbering]:checked', b)?.value;
         if (!numbering) { $('#numErr', b).textContent = 'กรุณาเลือกรูปแบบการรันลำดับเลขก่อนเริ่มโครงการ'; return false; }
         const fields = { name, code: v('code'), client: v('client'), location: v('location'), inspector: v('inspector'),
-          inspectDate: v('inspectDate'), accent, numbering, defaultType: v('defaultType') };
+          inspectDate: v('inspectDate'), accent, numbering, defaultType: v('defaultType'), overheadView: $('[name=overheadView]:checked', b)?.value || 'found' };
         let coverBlobId = p.coverBlobId || null;
         if (coverBlob) { if (coverBlobId) { forgetUrl(coverBlobId); await db.delBlob(coverBlobId); } coverBlobId = await db.putBlob(coverBlob); }
         else if (coverRemoved && coverBlobId) { forgetUrl(coverBlobId); await db.delBlob(coverBlobId); coverBlobId = null; }

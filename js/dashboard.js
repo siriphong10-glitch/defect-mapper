@@ -1,6 +1,7 @@
 // Project overview (dashboard) + export as a sharp PNG for presenting to clients.
 import { $, $$, esc, h, toast, download, loadScript, naturalCmp, safeName, thaiDateLong, polyArea } from './utils.js';
 import { fieldByRole, severityInfo, NO_SEVERITY_COLOR, defectTitle, TYPE_LABELS } from './templates.js';
+import { presentItems, overheadView, isOverhead } from './overhead.js';
 import { allTypes, evalTest, LEVEL, levelColor, codeOf, stationLabel } from './tests.js';
 
 const NAVY = '#2c5282';
@@ -8,7 +9,9 @@ const LEVEL_ORDER = ['ok', 'warn', 'bad', 'na', 'info', 'none'];
 const pct = (a, b) => (b ? Math.round(a / b * 100) : 0);
 const dayKey = (ts) => { const d = new Date(ts); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
 
-export function computeStats({ project, floors, defects, tests }) {
+export function computeStats({ project, floors, defects: rawD, tests: rawT }) {
+  // overhead items count on the floor chosen in the project settings (where found / structure above)
+  const defects = presentItems(project, floors, rawD), tests = presentItems(project, floors, rawT);
   const fo = new Map(floors.map((f, i) => [f.id, i]));
   const floorById = new Map(floors.map(f => [f.id, f]));
   // severity / urgency
@@ -130,7 +133,7 @@ export function renderDashboard(root, ctx) {
       <section class="db-card"><h3>ความเร่งด่วน</h3>${st.urgList.map(s => bar(s.label, s.n, urgMax, s.label === 'ยังไม่ระบุ' ? '#cbd5e1' : NAVY)).join('') || '<p class="muted">ยังไม่มีข้อมูล</p>'}</section>
       <section class="db-card wide"><h3>หัวข้อความเสียหายที่พบมากที่สุด${st.headList.length > 10 ? ` <small>(10 จาก ${st.headList.length} หัวข้อ)</small>` : ''}</h3>
         ${headTop.map(s => bar((s.el ? s.el + ' – ' : '') + s.label, s.n, headMax, NAVY)).join('') || '<p class="muted">ยังไม่มีข้อมูล</p>'}</section>
-      <section class="db-card wide"><h3>จำนวนจุดความเสียหายแยกตามชั้น <small>(สีตามระดับความเสียหาย • กดเพื่อเปิดชั้นนั้น)</small></h3>
+      <section class="db-card wide"><h3>จำนวนจุดความเสียหายแยกตามชั้น <small>(สีตามระดับความเสียหาย • กดเพื่อเปิดชั้นนั้น${[...(ctx.defects || []), ...(ctx.tests || [])].some(isOverhead) ? (overheadView(p) === 'structure' ? ' • ตำแหน่งเหนือศีรษะนับเป็นของชั้นโครงสร้างด้านบน' : ' • ตำแหน่งเหนือศีรษะนับเป็นของชั้นที่พบ') : ''})</small></h3>
         ${st.perFloor.map(f => `<div class="db-row click" data-floor="${f.floor.id}" title="${esc(f.floor.name)}: ${f.n} จุด${f.tests ? ` • จุดทดสอบ ${f.tests}` : ''}"><span class="db-lab">${esc(f.floor.name)}</span>${stacked(f.segs, f.n, floorMax)}<span class="db-val">${f.n}</span></div>`).join('') || '<p class="muted">ยังไม่มีแปลน</p>'}
         <div class="db-legend">${st.sevList.map(s => `<span><i style="background:${s.color}"></i>${esc(s.label)}</span>`).join('')}</div></section>
       ${st.types.length ? `<section class="db-card wide"><h3>ผลการทดสอบแยกตามวิธี</h3>
@@ -149,10 +152,10 @@ export function renderDashboard(root, ctx) {
         ${st.people.map(x => `<tr><td>${esc(x.who)}</td><td>${x.defects}</td><td>${x.tests}</td></tr>`).join('') || '<tr><td colspan="3" class="muted">ยังไม่มีข้อมูล</td></tr>'}</tbody></table></section>
       ${editable ? `<section class="db-card wide team-only"><h3>ความครบถ้วนของข้อมูล <small>(เห็นเฉพาะทีมในโหมดแก้ไข ไม่รวมในภาพที่ส่งออก)</small></h3>
         <div class="db-gaps">
-          ${gapList('ความเสียหายที่ยังไม่มีรูป', st.gaps.noPhoto.map(d => ({ id: d.id, mode: 'defect', floor: d.floorId, text: `จุดที่ ${d.no}`, sub: st.floorName(d.floorId) })))}
-          ${gapList('ยังไม่ระบุระดับความเสียหาย', st.gaps.noSev.map(d => ({ id: d.id, mode: 'defect', floor: d.floorId, text: `จุดที่ ${d.no}`, sub: st.floorName(d.floorId) })))}
-          ${gapList('ยังไม่ระบุหัวข้อความเสียหาย', st.gaps.noTitle.map(d => ({ id: d.id, mode: 'defect', floor: d.floorId, text: `จุดที่ ${d.no}`, sub: st.floorName(d.floorId) })))}
-          ${gapList('จุดทดสอบที่ยังไม่บันทึกค่า', st.gaps.notRecorded.map(({ s, id }) => ({ id: s.id, mode: 'test', floor: s.floorId, text: codeOf(s, id), sub: st.floorName(s.floorId) })))}
+          ${gapList('ความเสียหายที่ยังไม่มีรูป', st.gaps.noPhoto.map(d => ({ id: d.id, mode: 'defect', floor: d._found?.id || d.floorId, text: `จุดที่ ${d.no}`, sub: st.floorName(d._found?.id || d.floorId) })))}
+          ${gapList('ยังไม่ระบุระดับความเสียหาย', st.gaps.noSev.map(d => ({ id: d.id, mode: 'defect', floor: d._found?.id || d.floorId, text: `จุดที่ ${d.no}`, sub: st.floorName(d._found?.id || d.floorId) })))}
+          ${gapList('ยังไม่ระบุหัวข้อความเสียหาย', st.gaps.noTitle.map(d => ({ id: d.id, mode: 'defect', floor: d._found?.id || d.floorId, text: `จุดที่ ${d.no}`, sub: st.floorName(d._found?.id || d.floorId) })))}
+          ${gapList('จุดทดสอบที่ยังไม่บันทึกค่า', st.gaps.notRecorded.map(({ s, id }) => ({ id: s.id, mode: 'test', floor: s._found?.id || s.floorId, text: codeOf(s, id), sub: st.floorName(s._found?.id || s.floorId) })))}
         </div></section>` : ''}
     </div>
     <div class="db-foot">${esc(ctx.org || '')}</div>

@@ -1,6 +1,7 @@
 import { db, uid } from './db.js';
 import { $, $$, esc, h, modal, toast, download, loadScript, loadImage, naturalCmp, safeName, thaiDateLong, centroid, polyArea } from './utils.js';
 import { loadBundle } from './project.js';
+import { presentItems, positionNote, overheadLegend } from './overhead.js';
 import { TYPE_LABELS, fieldByRole, severityInfo, NO_SEVERITY_COLOR, textOn, fieldText, defectTitle, groupKey } from './templates.js';
 
 const DEFAULT_ORG = 'บริษัท เพอร์ฟอร์มแมกซ์ บิวดิ้ง เซอร์วิซ จำกัด';
@@ -11,7 +12,8 @@ const SHAPE_TH = { point: 'จุด', area: 'พื้นที่', rect: 'พ
 // Report model — shared by every export format
 // =====================================================================================
 export async function buildModel(projectId, floorIds = null, filter = null) {
-  const { project, floors, defects } = await loadBundle(projectId);
+  const { project, floors, defects: raw } = await loadBundle(projectId);
+  const defects = presentItems(project, floors, raw); // overhead items may move to the floor above
   const fl = floorIds ? floors.filter(f => floorIds.includes(f.id)) : floors;
   const fo = new Map(fl.map((f, i) => [f.id, i]));
   const ds = defects.filter(d => fo.has(d.floorId))
@@ -33,6 +35,8 @@ export async function buildModel(projectId, floorIds = null, filter = null) {
       size: sizeF ? (d.data?.[sizeF.key] || '') : '',
       area,
       key: groupKey(project, d),
+      over: d._over, found: d._found, posNote: positionNote(d),
+      floorLabel: floor.name + (d._over ? ` — ${positionNote(d)}` : ''),
     };
   });
 
@@ -68,7 +72,7 @@ function sevLabelOf(tpl) {
 
 function positionsText(items) {
   const byFloor = new Map();
-  items.forEach(it => { if (!byFloor.has(it.floor.name)) byFloor.set(it.floor.name, []); byFloor.get(it.floor.name).push(it.no); });
+  items.forEach(it => { const k = it.floorLabel || it.floor.name; if (!byFloor.has(k)) byFloor.set(k, []); byFloor.get(k).push(it.no); });
   const parts = [...byFloor.entries()].map(([f, nos]) => `${f}: จุดที่ ${nos.join(', ')}`);
   return parts.join(' / ') + (items.length > 1 ? ` (รวม ${items.length} ${items.some(i => i.d.shape !== 'point') ? 'ตำแหน่ง' : 'จุด'})` : '');
 }
@@ -122,7 +126,7 @@ function cardModel(entries, { grouped, showUnchecked, maxPhotos }) {
     sevLabel: sevLabelOf(tpl), sevText: [worst.sevText, worst.urgText].filter(Boolean).join('/') || '-', sevColor: worst.sev ? worst.color : null,
     titleLabel: (fieldByRole(tpl, 'title') || {}).label || 'หัวข้อ', title: first.title,
     before, after, photos,
-    position: grouped ? positionsText(entries) : `${first.floor.name}${first.d.data?.grid ? ' / ' + first.d.data.grid : ''} (${SHAPE_TH[first.d.shape]})`,
+    position: grouped ? positionsText(entries) : `${first.floorLabel || first.floor.name}${first.d.data?.grid ? ' / ' + first.d.data.grid : ''} (${SHAPE_TH[first.d.shape]})`,
     typeLabel: TYPE_LABELS[d.type],
   };
 }
@@ -216,8 +220,15 @@ function drawMarks(ctx, items, ox, oy, sc, pxPerMm, markerScale) {
     ctx.fillStyle = textOn(color); ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.fillText(text, x, y + 0.2 * m);
   };
-  for (const it of items.filter(i => i.d.shape !== 'point')) { const [x, y] = P(centroid(it.d.pts)); badgeAt(x, y, it.no, it.color, true); }
-  for (const it of items.filter(i => i.d.shape === 'point')) { const [x, y] = P(it.d.pts[0]); badgeAt(x, y, it.no, it.color, false); }
+  const overRing = (x, y, text, square) => { // dashed frame = overhead (soffit / beam underside)
+    const fs = 3.6 * m; ctx.font = `700 ${fs}px Sarabun, sans-serif`;
+    const hh = 6 * m, w = Math.max(hh, ctx.measureText(text).width + 2.6 * m), g = 1.5 * m;
+    ctx.save(); ctx.setLineDash([1.3 * m, 0.9 * m]); ctx.lineWidth = 0.55 * m; ctx.strokeStyle = '#1f3a5f';
+    roundRect(ctx, x - w / 2 - g, y - hh / 2 - g, w + 2 * g, hh + 2 * g, square ? 2 * m : (hh + 2 * g) / 2);
+    ctx.fillStyle = 'rgba(255,255,255,.75)'; ctx.fill(); ctx.stroke(); ctx.restore();
+  };
+  for (const it of items.filter(i => i.d.shape !== 'point')) { const [x, y] = P(centroid(it.d.pts)); if (it.over) overRing(x, y, it.no, true); badgeAt(x, y, it.no, it.color, true); }
+  for (const it of items.filter(i => i.d.shape === 'point')) { const [x, y] = P(it.d.pts[0]); if (it.over) overRing(x, y, it.no, false); badgeAt(x, y, it.no, it.color, false); }
 }
 
 // Plan only (no page). opts: { boxMm:[w,h], dpi } for print, or { maxDim } in pixels.
@@ -260,6 +271,7 @@ function drawHeaderBand(ctx, x0, y0, W, hh, header) {
     const tw = ctx.measureText(lg.label).width;
     ctx.fillStyle = '#fff'; ctx.fillText(lg.label, x, y0 + hh / 2);
     x -= tw + f * 0.5;
+    if (lg.dashed) { ctx.save(); ctx.setLineDash([f * 0.2, f * 0.14]); ctx.strokeStyle = '#fff'; ctx.lineWidth = Math.max(1.5, f * 0.07); roundRect(ctx, x - f * 0.9, y0 + hh / 2 - f * 0.3, f * 1.1, f * 0.6, f * 0.3); ctx.stroke(); ctx.restore(); x -= f * 1.4; continue; }
     ctx.beginPath(); ctx.arc(x, y0 + hh / 2, f * 0.32, 0, Math.PI * 2); ctx.fillStyle = lg.color; ctx.fill();
     ctx.strokeStyle = '#fff'; ctx.lineWidth = Math.max(1.5, f * 0.06); ctx.stroke();
     x -= f * 1.1;
@@ -303,6 +315,12 @@ export async function planPage(floor, items, { paper = 'A3', dpi = 300, markerSc
     ctx.fillText('สัญลักษณ์:', x, y); x += ctx.measureText('สัญลักษณ์:').width + mm(3);
     ctx.font = `400 ${mm(3.2)}px Sarabun, sans-serif`;
     for (const lg of legend) {
+      if (lg.dashed) {
+        ctx.save(); ctx.setLineDash([mm(0.9), mm(0.6)]); ctx.strokeStyle = '#1f3a5f'; ctx.lineWidth = mm(0.4);
+        roundRect(ctx, x, y - mm(2), mm(6), mm(4), mm(2)); ctx.stroke(); ctx.restore();
+        x += mm(8); ctx.fillStyle = '#16202c'; ctx.fillText(lg.label, x, y); x += ctx.measureText(lg.label).width + mm(5);
+        continue;
+      }
       ctx.beginPath(); ctx.arc(x + mm(1.6), y, mm(1.6), 0, Math.PI * 2); ctx.fillStyle = lg.color; ctx.fill();
       ctx.strokeStyle = 'rgba(0,0,0,.35)'; ctx.lineWidth = mm(0.2); ctx.stroke();
       x += mm(4.6); ctx.fillStyle = '#16202c'; ctx.fillText(lg.label, x, y); x += ctx.measureText(lg.label).width + mm(5);
@@ -322,6 +340,8 @@ function legendOf(model) {
   }
   const list = [...seen.entries()].map(([label, color]) => ({ label, color }));
   if (model.items.some(i => !i.sev)) list.push({ label: 'ยังไม่ระบุ', color: NO_SEVERITY_COLOR });
+  const oh = overheadLegend(model.project, model.items);
+  if (oh) list.push({ label: oh, dashed: true });
   return list;
 }
 
@@ -520,7 +540,7 @@ async function exportExcel(projectId, opts, prog = () => {}) {
     for (const f of p.templates[t].fields) if (!f.hidden && !cols.find(c => c.label === f.label)) cols.push({ label: f.label });
   }
   const rows = model.items.map(it => {
-    const r = { 'ลำดับ': isNaN(+it.no) ? it.no : +it.no, 'ชั้น/แปลน': it.floor.name, 'ประเภทการตรวจ': TYPE_LABELS[it.d.type], 'ลักษณะ': SHAPE_TH[it.d.shape] };
+    const r = { 'ลำดับ': isNaN(+it.no) ? it.no : +it.no, 'ชั้น/แปลน': it.floor.name, 'ตำแหน่ง': it.over ? it.posNote : 'ในพื้นที่ชั้น', 'ประเภทการตรวจ': TYPE_LABELS[it.d.type], 'ลักษณะ': SHAPE_TH[it.d.shape] };
     for (const c of cols) r[c.label] = '';
     for (const f of it.tpl.fields) if (!f.hidden) r[f.label] = fieldText(f, it.d.data?.[f.key]);
     r['พื้นที่จากแปลน (ตร.ม.)'] = it.area != null ? +it.area.toFixed(2) : '';
@@ -555,7 +575,7 @@ async function exportExcel(projectId, opts, prog = () => {}) {
 
   const fl = model.perFloor.map(pf => {
     const r = { 'ชั้น/แปลน': pf.floor.name, 'จำนวนจุด': pf.items.length };
-    legendOf(model).forEach(lg => { r[lg.label] = pf.items.filter(i => (i.sevText || 'ยังไม่ระบุ') === lg.label).length; });
+    legendOf(model).filter(lg => !lg.dashed).forEach(lg => { r[lg.label] = pf.items.filter(i => (i.sevText || 'ยังไม่ระบุ') === lg.label).length; });
     return r;
   });
   const ws3 = XLSX.utils.json_to_sheet(fl);
@@ -611,7 +631,7 @@ async function exportWord(projectId, opts, prog = () => {}) {
   };
 
   const legend = legendOf(model);
-  const legendPara = () => para([run('สัญลักษณ์: ', { bold: true, size: 26 }), ...legend.flatMap(l => [run('●', { color: l.color.replace('#', ''), size: 30 }), run(` ${l.label}    `, { size: 26 })]),
+  const legendPara = () => para([run('สัญลักษณ์: ', { bold: true, size: 26 }), ...legend.flatMap(l => l.dashed ? [run('[ ┅ ]', { color: '1F3A5F', size: 24 }), run(` ${l.label}    `, { size: 26 })] : [run('●', { color: l.color.replace('#', ''), size: 30 }), run(` ${l.label}    `, { size: 26 })]),
     run('(วงกลม = จุด, สี่เหลี่ยม = พื้นที่)', { size: 24, color: '666666' })], { after: 120 });
 
   // ---------- card table ----------
@@ -738,7 +758,7 @@ async function exportWord(projectId, opts, prog = () => {}) {
     for (const it of model.items) {
       const sz = [it.size || (it.area != null ? it.area.toFixed(2) + ' ตร.ม.' : ''), it.d.data?.grid].filter(Boolean).join(' / ');
       rows.push(new D.TableRow({ cantSplit: true, children: [
-        cell(it.no, { align: D.AlignmentType.CENTER, size: 26 }), cell(it.floor.name, { size: 26 }), cell(it.element || '-', { size: 26 }), cell(it.title, { size: 26 }),
+        cell(it.no, { align: D.AlignmentType.CENTER, size: 26 }), cell(it.floorLabel, { size: 26 }), cell(it.element || '-', { size: 26 }), cell(it.title, { size: 26 }),
         cell([it.sevText, it.urgText].filter(Boolean).join('/') || '-', { size: 26, align: D.AlignmentType.CENTER, fill: it.sev ? it.color.replace('#', '') : undefined, color: it.sev ? textOn(it.color).replace('#', '') : undefined }),
         cell(sz || '-', { size: 26 }),
       ] }));
@@ -853,7 +873,7 @@ async function buildPdfBlocks(model, opts, urls, prog) {
   const p = model.project;
   const blocks = []; // {html, page:'new'|'land'|'cover', split?:true}
   const legend = legendOf(model);
-  const legendHtml = `<div class="rp-legend"><b>สัญลักษณ์:</b>${legend.map(l => `<i style="background:${l.color}"></i>${esc(l.label)}`).join('')} <span style="color:#666;margin-left:10px">(วงกลม = จุด, สี่เหลี่ยม = พื้นที่)</span></div>`;
+  const legendHtml = `<div class="rp-legend"><b>สัญลักษณ์:</b>${legend.map(l => l.dashed ? `<i style="width:20px;border-radius:6px;border:1.5px dashed #1f3a5f;background:none"></i>${esc(l.label)}` : `<i style="background:${l.color}"></i>${esc(l.label)}`).join('')} <span style="color:#666;margin-left:10px">(วงกลม = จุด, สี่เหลี่ยม = พื้นที่)</span></div>`;
   if (opts.cover) {
     const cov = p.coverBlobId ? await photoUrl(p.coverBlobId, urls) : '';
     const info = [['รหัสงาน', p.code], ['ผู้ว่าจ้าง', p.client], ['สถานที่ตั้ง', p.location], ['ผู้ตรวจสอบ', p.inspector], ['วันที่ตรวจสอบ', thaiDateLong(p.inspectDate)], ['จำนวนตำแหน่งที่พบ', `${model.items.length} ตำแหน่ง`]].filter(r => r[1]);
@@ -892,7 +912,7 @@ async function buildPdfBlocks(model, opts, urls, prog) {
     blocks.push({ page: 'new', html: `<h1>ตารางตำแหน่งความเสียหาย-ข้อบกพร่องทั้งหมด</h1>` });
     blocks.push({ split: true, html: `<table class="rp-t" style="font-size:12.5px"><colgroup><col style="width:7%"><col style="width:14%"><col style="width:14%"><col style="width:32%"><col style="width:15%"><col style="width:18%"></colgroup>
       <thead><tr><th>ลำดับ</th><th>ชั้น/แปลน</th><th>โครงสร้าง/หมวด</th><th>หัวข้อความเสียหาย</th><th>ระดับ/เร่งด่วน</th><th>ขนาด/ตำแหน่ง</th></tr></thead><tbody>
-      ${model.items.map(it => `<tr><td class="c">${esc(it.no)}</td><td>${esc(it.floor.name)}</td><td>${esc(it.element || '-')}</td><td>${esc(it.title)}</td>
+      ${model.items.map(it => `<tr><td class="c">${esc(it.no)}</td><td>${esc(it.floorLabel)}</td><td>${esc(it.element || '-')}</td><td>${esc(it.title)}</td>
         <td class="c" style="${it.sev ? `background:${it.color};color:${textOn(it.color)}` : ''}">${esc([it.sevText, it.urgText].filter(Boolean).join('/') || '-')}</td>
         <td>${esc([it.size || (it.area != null ? it.area.toFixed(2) + ' ตร.ม.' : ''), it.d.data?.grid].filter(Boolean).join(' / ') || '-')}</td></tr>`).join('')}
       <tr class="tot"><td colspan="6" class="c">รวมทั้งหมด ${model.items.length} ตำแหน่ง</td></tr></tbody></table>` });
@@ -1074,7 +1094,7 @@ export async function exportPack(projectId, prog = () => {}, popts = {}) {
 
     // human/AI-readable report data
     const report = {
-      project: { name: p.name, code: p.code, client: p.client, location: p.location, inspector: p.inspector, inspectDate: p.inspectDate, numbering: p.numbering === 'auto' ? 'อัตโนมัติ' : 'กำหนดเอง' },
+      project: { name: p.name, code: p.code, client: p.client, location: p.location, inspector: p.inspector, inspectDate: p.inspectDate, numbering: p.numbering === 'auto' ? 'อัตโนมัติ' : 'กำหนดเอง', overheadPositionsShownOn: p.overheadView === 'structure' ? 'ชั้นของโครงสร้าง (ชั้นด้านบน)' : 'ชั้นที่พบ' },
       totals: { points: model.items.length, floors: floors.length, headings: model.groups.length },
       floors: model.perFloor.map((pf, i) => ({ order: i + 1, name: pf.floor.name, count: pf.items.length, scaleMetersPerPixel: pf.floor.scale || null,
         annotatedPlan: `plans/annotated/${String(i + 1).padStart(2, '0')}_${safeName(pf.floor.name)}.png` })),
@@ -1083,7 +1103,7 @@ export async function exportPack(projectId, prog = () => {}, popts = {}) {
         const fields = {};
         it.tpl.fields.forEach(f => { if (!f.hidden) { const v = fieldText(f, it.d.data?.[f.key]); if (v) fields[f.label] = v; } });
         return {
-          no: it.no, floor: it.floor.name, inspectionType: TYPE_LABELS[it.d.type], shape: SHAPE_TH[it.d.shape],
+          no: it.no, floor: it.floor.name, position: it.over ? 'overhead' : 'floor', positionNote: it.posNote || '', foundOnFloor: it.found?.name || it.floor.name, inspectionType: TYPE_LABELS[it.d.type], shape: SHAPE_TH[it.d.shape],
           title: it.title, element: it.element, severity: it.sevText, urgency: it.urgText,
           areaFromPlan_m2: it.area != null ? +it.area.toFixed(2) : null, fields,
           photos: (it.d.photoIds || []).map(id => blobsMap[id]).filter(Boolean),

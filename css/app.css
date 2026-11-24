@@ -67,11 +67,11 @@ input.inp, select.inp, textarea.inp {
 
 /* ---------- modal ---------- */
 .modal-back { position: fixed; inset: 0; background: rgba(16,24,40,.45); display: grid; place-items: center; z-index: 1000; padding: 16px; }
-.modal { background: #fff; border-radius: 14px; width: min(520px, 100%); max-height: calc(100vh - 32px); display: flex; flex-direction: column; box-shadow: 0 20px 50px rgba(0,0,0,.25); }
+.modal { background: #fff; border-radius: 14px; width: min(520px, 100%); max-height: calc(100vh - 32px); max-height: calc(100dvh - 32px); display: flex; flex-direction: column; box-shadow: 0 20px 50px rgba(0,0,0,.25); }
 .modal.wide { width: min(860px, 100%); }
 .modal-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 18px; border-bottom: 1px solid var(--line-2); }
 .modal-head h3 { font-size: 17px; }
-.modal-body { padding: 16px 18px; overflow: auto; }
+.modal-body { padding: 16px 18px; overflow: auto; min-height: 0; }
 .modal-body p { margin: 0 0 8px; }
 .modal-foot { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 18px; border-top: 1px solid var(--line-2); }
 
@@ -437,3 +437,20 @@ body:has(.ws.overview) .credit { bottom: 8px; }
 body:has(.ws-right:not(.closed)) .credit { right: calc(30% + 14px); }
 @media (max-width: 860px) { body:has(.ws) .credit { bottom: 112px; } body:has(.ws-right:not(.closed)) .credit { right: 14px; } }
 @media print { .credit { display: none !important; } }
+
+/* floor-above alignment dialog */
+.al-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; }
+.al-cap { font-size: 13px; font-weight: 600; margin: 0 0 4px; color: var(--ink, #16202c); }
+.al-view { position: relative; height: min(52vh, 460px); overflow: hidden; border: 1px solid #cfd6e0; border-radius: 8px; background: #eef1f5; touch-action: none; cursor: crosshair; }
+.al-stage { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
+.al-stage img, .al-stage svg { position: absolute; left: 0; top: 0; width: 100%; height: 100%; user-select: none; pointer-events: none; }
+.al-stage img { background: #fff; }
+.al-zoom { position: absolute; right: 6px; top: 6px; display: flex; flex-direction: column; gap: 4px; }
+.al-zoom button { width: 30px; height: 30px; border-radius: 6px; border: 1px solid #cfd6e0; background: #fff; font-size: 15px; cursor: pointer; }
+@media (max-width: 760px) { .al-grid { grid-template-columns: 1fr; } .al-view { height: 38vh; } }
+/* phone: home header wraps instead of widening the page */
+@media (max-width: 600px) {
+  .home-top .inner { flex-wrap: wrap; row-gap: 8px; }
+  .home-top .inner .spacer { flex-basis: 100%; height: 0; }
+  .home-top .inner .btn { padding-left: 10px; padding-right: 10px; }
+}
