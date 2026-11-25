@@ -1,7 +1,9 @@
 import { db, uid } from './db.js';
-import { $, $$, esc, h, modal, toast, download, loadScript, loadImage, naturalCmp, safeName, thaiDateLong, centroid, polyArea } from './utils.js';
+import { $, $$, esc, h, modal, toast, download, downloadCapture, loadScript, loadImage, naturalCmp, safeName, thaiDateLong, centroid, polyArea } from './utils.js';
 import { loadBundle } from './project.js';
 import { presentItems, positionNote, overheadLegend } from './overhead.js';
+import { buildTestModel, testWordSections, testPdfBlocks, addTestSheets } from './test-export.js';
+import { allTypes } from './tests.js';
 import { TYPE_LABELS, fieldByRole, severityInfo, NO_SEVERITY_COLOR, textOn, fieldText, defectTitle, groupKey } from './templates.js';
 
 const DEFAULT_ORG = 'บริษัท เพอร์ฟอร์มแมกซ์ บิวดิ้ง เซอร์วิซ จำกัด';
@@ -11,6 +13,25 @@ const SHAPE_TH = { point: 'จุด', area: 'พื้นที่', rect: 'พ
 // =====================================================================================
 // Report model — shared by every export format
 // =====================================================================================
+// work categories for exporting: structural defects, building systems (MEP) and architectural defects
+export const CATS = [
+  { id: 'struct', label: 'งานโครงสร้าง' },
+  { id: 'mep', label: 'งานระบบ' },
+  { id: 'arch', label: 'งานสถาปัตยกรรม' },
+];
+export function catOf(project, d) {
+  if ((d.type || 'structural') === 'structural') return 'struct';
+  const tpl = project.templates[d.type] || project.templates.general;
+  const f = fieldByRole(tpl, 'element');
+  const v = String((f && d.data?.[f.key]) || '');
+  if (/โครงสร้าง/.test(v)) return 'struct';
+  if (/ระบบ|ไฟฟ้า|สุขาภิบาล|ประปา|ปรับอากาศ|ระบายอากาศ|อัคคีภัย|ลิฟต์|ลิฟท์|MEP/i.test(v)) return 'mep';
+  return 'arch'; // architecture, exterior works, other and not specified
+}
+// document title for the chosen content
+const reportTitle = (opts) => opts.title || 'รายการความเสียหาย-ข้อบกพร่อง';
+const reportFile = (opts) => opts.fileTitle || 'รายการความเสียหาย';
+
 export async function buildModel(projectId, floorIds = null, filter = null) {
   const { project, floors, defects: raw } = await loadBundle(projectId);
   const defects = presentItems(project, floors, raw); // overhead items may move to the floor above
@@ -42,6 +63,7 @@ export async function buildModel(projectId, floorIds = null, filter = null) {
 
   if (filter) {
     if (filter.types?.length) items = items.filter(it => filter.types.includes(it.d.type));
+    if (filter.cats) items = items.filter(it => filter.cats.includes(catOf(project, it.d)));
     if (filter.sevs?.length) items = items.filter(it => filter.sevs.includes(it.sevText || '__none'));
     if (filter.sort === 'floor') items.sort((a, b) => fo.get(a.floor.id) - fo.get(b.floor.id) || naturalCmp(a.no, b.no));
   }
@@ -368,6 +390,12 @@ export async function exportDialog(projectId, initialFmt = 'word') {
   const sevs = new Map();
   for (const t of Object.values(project.templates)) (fieldByRole(t, 'severity')?.options || []).forEach(o => sevs.set(o.label, o.color));
   const usedTypes = [...new Set(defects.map(d => d.type))];
+  // content categories and tests
+  const { tests } = await loadBundle(projectId);
+  const tModel = await buildTestModel(projectId);
+  const tTypes = tModel.types;
+  const catCount = (c, floorIds) => defects.filter(d => catOf(project, d) === c && (!floorIds || floorIds.includes(d.floorId))).length;
+  const prefCats = pref('cats', null);
 
   const body = h(`<div>
     <div class="sec-title" style="margin-top:0">1. เลือกรูปแบบไฟล์</div>
@@ -408,7 +436,18 @@ export async function exportDialog(projectId, initialFmt = 'word') {
       <div class="sec-title">3. เลือกข้อมูลที่ส่งออก</div>
       <div class="fld"><span>ชั้น / แปลน <a href="#" id="flAll" style="font-weight:400;margin-left:6px">เลือกทั้งหมด</a> <a href="#" id="flNone" style="font-weight:400;margin-left:4px">ไม่เลือก</a></span>
         <div class="floor-picks">${floors.map(f => `<label class="chip on"><input type="checkbox" name="floor" value="${f.id}" checked>${esc(f.name)} <span class="muted">(${defects.filter(d => d.floorId === f.id).length})</span></label>`).join('') || '<span class="muted">ยังไม่มีแปลน</span>'}</div></div>
-      ${usedTypes.length > 1 ? `<div class="fld"><span>ประเภทการตรวจสอบ</span><div class="floor-picks">${usedTypes.map(t => `<label class="chip on"><input type="checkbox" name="ftype" value="${t}" checked>${TYPE_LABELS[t]}</label>`).join('')}</div></div>` : ''}
+      <div class="fld"><span>หมวดที่ส่งออก</span><div class="floor-picks" id="catPicks">${CATS.map(c => { const n = catCount(c.id); const on = n > 0 && (!prefCats || prefCats.includes(c.id)); return `<label class="chip ${on ? 'on' : ''}"><input type="checkbox" name="fcat" value="${c.id}" ${on ? 'checked' : ''} ${n ? '' : 'disabled'}>${c.label} <span class="muted">(${n})</span></label>`; }).join('')}
+        <label class="chip ${tTypes.length && pref('testsOn', true) ? 'on' : ''}" data-for="word pdf excel"><input type="checkbox" name="ftests" ${tTypes.length && pref('testsOn', true) ? 'checked' : ''} ${tTypes.length ? '' : 'disabled'}>ผลทดสอบ <span class="muted">(${tModel.stations.length} จุด)</span></label></div>
+        <span class="hint">งานโครงสร้าง = แบบตรวจสอบโครงสร้าง และหมวด “งานโครงสร้าง” ในแบบตรวจสอบทั่วไป • งานระบบ = หมวดงานระบบไฟฟ้า สุขาภิบาล ปรับอากาศ ป้องกันอัคคีภัย ลิฟต์ • งานสถาปัตยกรรม = หมวดที่เหลือ</span></div>
+      <div class="fld" data-for="word pdf excel"><span>การรวมไฟล์</span><div class="seg" id="modeSeg">
+        <button type="button" data-mode="single" class="${pref('splitMode', 'single') === 'single' ? 'on' : ''}">รวมเป็นไฟล์เดียว</button>
+        <button type="button" data-mode="split" class="${pref('splitMode', 'single') === 'split' ? 'on' : ''}">แยกไฟล์ตามหมวด (ได้ .zip)</button></div></div>
+      <div class="fld" id="testBox" data-for="word pdf excel"><span>ผลทดสอบ</span>
+        <div class="seg" id="tmergeSeg"><button type="button" data-tm="merge" class="${pref('testMerge', false) ? 'on' : ''}">รวมทุกหัวข้อทดสอบ</button><button type="button" data-tm="split" class="${pref('testMerge', false) ? '' : 'on'}">แยกตามหัวข้อทดสอบ</button></div>
+        <div class="floor-picks" style="margin-top:6px">${tTypes.map(t => `<label class="chip on"><input type="checkbox" name="fttype" value="${t.id}" checked>${esc(t.short)} <span class="muted">(${tModel.stations.filter(s => s.tests?.[t.id]).length})</span></label>`).join('')}</div>
+        <div data-for="word pdf">${ckb('tPlans', 'แปลนตำแหน่งจุดทดสอบ', pref('tPlans', true))}${ckb('tCriteria', 'สรุปผลและตารางเกณฑ์ประเมินที่ใช้', pref('tCriteria', true))}</div>
+        ${ckb('tEmpty', 'รวมจุดที่ปักตำแหน่งไว้แต่ยังไม่บันทึกค่า', pref('tEmpty', true))}
+        <span class="hint" id="tmHint"></span></div>
       <div class="fld"><span>ระดับความเสียหาย</span><div class="floor-picks">${[...sevs.entries()].map(([l, c]) => `<label class="chip on"><input type="checkbox" name="fsev" value="${esc(l)}" checked><span class="dot" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${c}"></span>${esc(l)}</label>`).join('')}
         <label class="chip on"><input type="checkbox" name="fsev" value="__none" checked>ยังไม่ระบุ</label></div></div>
       <div class="row" style="flex-wrap:wrap">
@@ -425,14 +464,22 @@ export async function exportDialog(projectId, initialFmt = 'word') {
   const current = () => ({
     fmt: $('[name=fmt]:checked', body).value,
     floorIds: $$('[name=floor]:checked', body).map(x => x.value),
-    types: $$('[name=ftype]:checked', body).map(x => x.value),
+    cats: $$('[name=fcat]:checked', body).map(x => x.value),
+    testsOn: !!$('[name=ftests]', body)?.checked && ['word', 'pdf', 'excel'].includes($('[name=fmt]:checked', body).value),
+    ttypes: $$('[name=fttype]:checked', body).map(x => x.value),
+    mode: $('#modeSeg .on', body)?.dataset.mode || 'single',
+    testMerge: $('#tmergeSeg .on', body)?.dataset.tm === 'merge',
     sevs: $$('[name=fsev]:checked', body).map(x => x.value),
   });
   const countMatching = () => {
     const c = current();
     const tplSev = (d) => { const t = project.templates[d.type]; const f = fieldByRole(t, 'severity'); const v = f ? d.data?.[f.key] : ''; return v && severityInfo(t, v) ? v : '__none'; };
-    const n = defects.filter(d => c.floorIds.includes(d.floorId) && (!usedTypes.length || usedTypes.length < 2 || c.types.includes(d.type)) && c.sevs.includes(tplSev(d))).length;
-    $('#expCount', body).textContent = `จะส่งออก ${n} จาก ${defects.length} จุด`;
+    const n = defects.filter(d => c.floorIds.includes(d.floorId) && c.cats.includes(catOf(project, d)) && c.sevs.includes(tplSev(d))).length;
+    const nt = c.testsOn ? tModel.stations.filter(s => c.floorIds.includes(s._found?.id || s.floorId) && c.ttypes.some(id => s.tests?.[id])).length : 0;
+    const files = c.mode === 'split' && c.fmt !== 'image' ? c.cats.filter(id => catCount(id, c.floorIds)).length + (c.testsOn ? (c.testMerge ? 1 : c.ttypes.length) : 0) : 1;
+    $('#expCount', body).textContent = `จะส่งออกความเสียหาย ${n} จาก ${defects.length} จุด${c.testsOn ? ` และจุดทดสอบ ${nt} จุด` : ''}${files > 1 ? ` • แยกเป็น ${files} ไฟล์ รวมใน .zip` : ''}`;
+    $('#testBox', body).style.display = c.testsOn ? '' : 'none';
+    $('#tmHint', body).textContent = c.testMerge ? 'แปลนชั้นละแผ่นแสดงทุกจุดทดสอบ (รหัสทุกการทดสอบของจุดนั้น) แล้วตามด้วยตารางผลของแต่ละการทดสอบ' : 'แต่ละการทดสอบมีบทของตัวเอง: แปลนตำแหน่ง ตารางผล และเกณฑ์' + (c.mode === 'split' ? ' — แยกเป็นไฟล์ละการทดสอบ' : '');
   };
   const sync = () => {
     const fmt = current().fmt;
@@ -442,6 +489,7 @@ export async function exportDialog(projectId, initialFmt = 'word') {
     countMatching();
   };
   $$('[name=fmt]', body).forEach(r => r.onchange = sync);
+  $$('#modeSeg [data-mode], #tmergeSeg [data-tm]', body).forEach(b => b.onclick = () => { $$('button', b.parentElement).forEach(x => x.classList.toggle('on', x === b)); countMatching(); });
   $$('.floor-picks .chip', body).forEach(c => $('input', c).onchange = (e) => { c.classList.toggle('on', e.target.checked); countMatching(); });
   const setAll = (on) => (e) => { e.preventDefault(); $$('[name=floor]', body).forEach(i => { i.checked = on; i.closest('.chip').classList.toggle('on', on); }); countMatching(); };
   if ($('#flAll', body)) { $('#flAll', body).onclick = setAll(true); $('#flNone', body).onclick = setAll(false); }
@@ -462,23 +510,64 @@ export async function exportDialog(projectId, initialFmt = 'word') {
           xlsSummary: ck('xlsSummary'), xlsCoords: ck('xlsCoords'),
           packAnnotated: ck('packAnnotated'), packPhotos: ck('packPhotos'), packOriginal: ck('packOriginal'),
           sort: val('sort'), floorIds: c.floorIds,
-          filter: { types: usedTypes.length > 1 ? c.types : [], sevs: c.sevs.length === sevs.size + 1 ? [] : c.sevs, sort: val('sort') },
+          filter: { cats: c.cats, sevs: c.sevs.length === sevs.size + 1 ? [] : c.sevs, sort: val('sort') },
+          testOpts: { plans: ck('tPlans'), criteria: ck('tCriteria'), includeEmpty: ck('tEmpty') },
         };
+        const testsOn = c.testsOn && c.ttypes.length > 0;
+        if (fmt !== 'pack' && !c.cats.length && !testsOn) { toast('เลือกอย่างน้อย 1 หมวด', 'error'); return false; }
         if (fmt !== 'pack' && !opts.floorIds.length) { toast('เลือกอย่างน้อย 1 ชั้น', 'error'); return false; }
         if (fmt !== 'pack' && !c.sevs.length) { toast('เลือกระดับความเสียหายอย่างน้อย 1 ระดับ', 'error'); return false; }
-        if (['word', 'pdf'].includes(fmt) && !(opts.cover || opts.summary || opts.plans || opts.groups || opts.table || opts.perPoint)) { toast('เลือกอย่างน้อย 1 ส่วน', 'error'); return false; }
-        const { filter, floorIds, ...keep } = opts;
-        await db.setMeta('exportPrefs', { ...saved, ...keep, [fmt === 'pdf' ? 'coverPdf' : 'coverWord']: opts.cover, lastFormat: fmt });
+        if (['word', 'pdf'].includes(fmt) && c.cats.length && !(opts.cover || opts.summary || opts.plans || opts.groups || opts.table || opts.perPoint)) { toast('เลือกอย่างน้อย 1 ส่วน', 'error'); return false; }
+        const { filter, floorIds, testOpts, ...keep } = opts;
+        await db.setMeta('exportPrefs', { ...saved, ...keep, [fmt === 'pdf' ? 'coverPdf' : 'coverWord']: opts.cover, lastFormat: fmt,
+          cats: c.cats, testsOn: c.testsOn, splitMode: c.mode, testMerge: c.testMerge, tPlans: testOpts.plans, tCriteria: testOpts.criteria, tEmpty: testOpts.includeEmpty });
         await db.setMeta('orgName', opts.org);
         $('#expProg', b).style.display = '';
         $$('.modal-foot button', b.parentElement).forEach(x => x.disabled = true);
         const prog = (msg, frac) => { $('#expMsg', b).textContent = msg; if (frac != null) $('#expBar', b).style.width = Math.round(frac * 100) + '%'; };
         try {
-          if (fmt === 'word') await exportWord(projectId, opts, prog);
-          else if (fmt === 'pdf') await exportPdf(projectId, opts, prog);
-          else if (fmt === 'image') await exportImages(projectId, opts, prog);
-          else if (fmt === 'excel') await exportExcel(projectId, opts, prog);
-          else if (fmt === 'pack') await exportPack(projectId, prog, { original: opts.packOriginal, annotated: opts.packAnnotated, photos: opts.packPhotos });
+          const run1 = (o, pr) => fmt === 'word' ? exportWord(projectId, o, pr) : fmt === 'pdf' ? exportPdf(projectId, o, pr) : exportExcel(projectId, o, pr);
+          const avail = CATS.filter(x => catCount(x.id)).map(x => x.id);
+          const catLabel = (ids) => !ids.length || avail.every(id => ids.includes(id)) ? '' : ids.map(id => CATS.find(x => x.id === id).label).join('และ');
+          const ttypes = tTypes.filter(t => c.ttypes.includes(t.id));
+          if (fmt === 'image') await exportImages(projectId, opts, prog);
+          else if (fmt === 'pack') { /* handled below */ }
+          else if (c.mode === 'split') {
+            const jobs = [];
+            for (const cat of CATS.filter(x => c.cats.includes(x.id) && catCount(x.id, c.floorIds))) {
+              jobs.push({ ...opts, filter: { ...opts.filter, cats: [cat.id] }, tests: null, title: `รายการความเสียหาย-ข้อบกพร่อง ${cat.label}`, fileTitle: `รายการความเสียหาย ${cat.label}` });
+            }
+            if (testsOn) {
+              if (c.testMerge) jobs.push({ ...opts, noDefects: true, filter: { ...opts.filter, cats: [] }, tests: { types: c.ttypes, merge: true }, title: 'ผลการทดสอบ', fileTitle: 'ผลทดสอบ' });
+              else ttypes.forEach(t => jobs.push({ ...opts, noDefects: true, filter: { ...opts.filter, cats: [] }, tests: { types: [t.id], merge: false }, title: `ผลการทดสอบ ${t.short}`, fileTitle: `ผลทดสอบ ${safeName(t.short)}` }));
+            }
+            if (!jobs.length) throw new Error('ไม่มีข้อมูลในหมวดที่เลือก');
+            downloadCapture.files = [];
+            try {
+              for (let j = 0; j < jobs.length; j++) {
+                await run1({ ...jobs[j], direct: true }, (msg, f) => prog(`ไฟล์ ${j + 1}/${jobs.length} (${jobs[j].fileTitle}) — ${msg}`, (j + (f ?? 0)) / jobs.length));
+              }
+            } finally { var files = downloadCapture.files; downloadCapture.files = null; }
+            if (files.length === 1) download(files[0].blob, files[0].name);
+            else {
+              prog('กำลังรวมไฟล์ .zip', 0.99);
+              await loadScript('vendor/jszip.min.js');
+              const zip = new JSZip();
+              files.forEach((f, i) => zip.file(`${String(i + 1).padStart(2, '0')} ${f.name.replace(/^.* - /, '')}`, f.blob));
+              download(await zip.generateAsync({ type: 'blob' }), `${fileBase(project)} - ส่งออกแยกหมวด (${EXPORT_FORMATS.find(f => f.id === fmt).label}).zip`);
+            }
+            toast(`ส่งออกแยก ${files.length} ไฟล์แล้ว`, 'ok');
+          } else {
+            const dl = catLabel(c.cats);
+            const one = { ...opts, noDefects: !c.cats.length, tests: testsOn ? { types: c.ttypes, merge: c.testMerge } : null };
+            if (!c.cats.length) { one.title = 'ผลการทดสอบ'; one.fileTitle = 'ผลทดสอบ'; }
+            else {
+              one.title = `รายการความเสียหาย-ข้อบกพร่อง${dl ? ' ' + dl : ''}${testsOn ? ' และผลการทดสอบ' : ''}`;
+              one.fileTitle = `รายการความเสียหาย${dl ? ' ' + dl : ''}${testsOn ? ' และผลทดสอบ' : ''}`;
+            }
+            await run1(one, prog);
+          }
+          if (fmt === 'pack') await exportPack(projectId, prog, { original: opts.packOriginal, annotated: opts.packAnnotated, photos: opts.packPhotos });
           return true;
         } catch (e) {
           console.error(e);
@@ -553,7 +642,8 @@ async function exportExcel(projectId, opts, prog = () => {}) {
     return r;
   });
   const wb = XLSX.utils.book_new();
-  const header = [['รายการความเสียหาย-ข้อบกพร่อง โครงการ ' + p.name], [[p.code, p.client, p.location].filter(Boolean).join(' • ')], []];
+  if (!opts.noDefects) {
+  const header = [[reportTitle(opts) + ' โครงการ ' + p.name], [[p.code, p.client, p.location].filter(Boolean).join(' • ')], []];
   const ws = XLSX.utils.aoa_to_sheet(header);
   XLSX.utils.sheet_add_json(ws, rows, { origin: 'A4' });
   XLSX.utils.sheet_add_aoa(ws, [[], ['รวมทั้งหมด', rows.length + ' จุด']], { origin: -1 });
@@ -582,8 +672,14 @@ async function exportExcel(projectId, opts, prog = () => {}) {
   ws3['!cols'] = [{ wch: 24 }, { wch: 10 }, { wch: 10 }, { wch: 10 }, { wch: 10 }, { wch: 10 }];
   XLSX.utils.book_append_sheet(wb, ws3, 'สรุปตามชั้น');
   }
+  }
+  if (opts.tests) {
+    const tm = await testModelFor(projectId, opts);
+    if (tm.types.length) addTestSheets(wb, tm, { includeEmpty: true }, opts.noDefects ? '' : 'ทดสอบ ');
+  }
+  if (!wb.SheetNames.length) throw new Error('ไม่มีข้อมูลในหมวดที่เลือก');
   prog('กำลังบันทึก', 0.9);
-  XLSX.writeFile(wb, `${fileBase(p)} - รายการความเสียหาย.xlsx`);
+  download(new Blob([XLSX.write(wb, { type: 'array', bookType: 'xlsx' })], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), `${fileBase(p)} - ${reportFile(opts)}.xlsx`);
   toast('ส่งออก Excel แล้ว', 'ok');
 }
 
@@ -593,7 +689,8 @@ async function exportExcel(projectId, opts, prog = () => {}) {
 const FONT = 'TH SarabunPSK';
 const FONTS = { ascii: FONT, hAnsi: FONT, cs: FONT, eastAsia: FONT };
 
-async function exportWord(projectId, opts, prog = () => {}) {
+async function exportWord(projectId, opts0, prog = () => {}) {
+  const opts = opts0.noDefects ? { ...opts0, summary: false, plans: false, groups: false, table: false, perPoint: false } : opts0;
   prog('กำลังโหลดไลบรารี', 0.05);
   await loadScript('vendor/docx.iife.js');
   const D = window.docx;
@@ -683,7 +780,7 @@ async function exportWord(projectId, opts, prog = () => {}) {
   // ---------- sections ----------
   const portrait = (children, first = false) => ({
     properties: { titlePage: !!(first && opts.cover), page: { size: { width: PAGE_W, height: PAGE_H }, margin: { top: MARGIN, bottom: MARGIN, left: MARGIN, right: MARGIN } } },
-    headers: { default: new D.Header({ children: [para([run(`${opts.org ? opts.org + '  |  ' : ''}รายการความเสียหาย-ข้อบกพร่อง โครงการ ${p.name}`, { size: 22, color: '666666' })], { align: D.AlignmentType.RIGHT })] }) },
+    headers: { default: new D.Header({ children: [para([run(`${opts.org ? opts.org + '  |  ' : ''}${reportTitle(opts)} โครงการ ${p.name}`, { size: 22, color: '666666' })], { align: D.AlignmentType.RIGHT })] }) },
     footers: { default: new D.Footer({ children: [new D.Paragraph({ alignment: D.AlignmentType.RIGHT, children: [new D.TextRun({ children: ['หน้า ', D.PageNumber.CURRENT], font: FONTS, size: 24, sizeComplexScript: 24, color: '666666' })] })] }) },
     children,
   });
@@ -693,11 +790,11 @@ async function exportWord(projectId, opts, prog = () => {}) {
 
   if (opts.cover) {
     body.push(para('', { after: 2000 }));
-    body.push(para([run('รายการความเสียหาย-ข้อบกพร่อง', { size: 52, bold: true, color: '1F3A5F' })], { align: D.AlignmentType.CENTER, after: 200 }));
+    body.push(para([run(reportTitle(opts), { size: reportTitle(opts).length > 34 ? 44 : 52, bold: true, color: '1F3A5F' })], { align: D.AlignmentType.CENTER, after: 200 }));
     body.push(para([run('ของโครงการ', { size: 36 })], { align: D.AlignmentType.CENTER, after: 120 }));
     body.push(para([run(p.name, { size: 44, bold: true })], { align: D.AlignmentType.CENTER, after: 400 }));
     if (p.coverBlobId) { const cb = await db.getBlob(p.coverBlobId); if (cb) body.push(para([await imgRun(cb, 460, 300)], { align: D.AlignmentType.CENTER, after: 400 })); }
-    const info = [['รหัสงาน', p.code], ['ผู้ว่าจ้าง', p.client], ['สถานที่ตั้ง', p.location], ['ผู้ตรวจสอบ', p.inspector], ['วันที่ตรวจสอบ', thaiDateLong(p.inspectDate)], ['จำนวนตำแหน่งที่พบ', `${model.items.length} ตำแหน่ง`]].filter(r => r[1]);
+    const info = [['รหัสงาน', p.code], ['ผู้ว่าจ้าง', p.client], ['สถานที่ตั้ง', p.location], ['ผู้ตรวจสอบ', p.inspector], ['วันที่ตรวจสอบ', thaiDateLong(p.inspectDate)], ['จำนวนตำแหน่งที่พบ', opts.noDefects ? '' : `${model.items.length} ตำแหน่ง`]].filter(r => r[1]);
     info.forEach(([k, v]) => body.push(para([run(k + ' : ', { bold: true, size: 32 }), run(v, { size: 32 })], { align: D.AlignmentType.CENTER, after: 60 })));
     if (opts.org) body.push(para([run(opts.org, { size: 32, bold: true, color: '1F3A5F' })], { align: D.AlignmentType.CENTER, before: 1200 }));
   }
@@ -785,9 +882,20 @@ async function exportWord(projectId, opts, prog = () => {}) {
   }
   flush();
 
+  if (opts.tests) {
+    const tm = await testModelFor(projectId, opts);
+    if (tm.types.length) {
+      const ts = await testWordSections(tm, { ...opts.testOpts, testMerge: opts.tests.merge, org: opts.org, planPaper: opts.planPaper, planDpi: opts.planDpi,
+        headText: `${opts.org ? opts.org + '  |  ' : ''}${reportTitle(opts)} โครงการ ${p.name}` }, prog, D);
+      if (sections.length === 1 && opts.cover) { /* cover page stays alone */ }
+      sections.push(...ts);
+    }
+  }
+  if (!sections.length) throw new Error('ไม่มีข้อมูลในหมวดที่เลือก');
+
   prog('กำลังรวมไฟล์ Word', 0.97);
   const doc = new D.Document({
-    creator: opts.org || 'Inspect Recorder', title: `รายการความเสียหาย-ข้อบกพร่อง ${p.name}`,
+    creator: opts.org || 'Inspect Recorder', title: `${reportTitle(opts)} ${p.name}`,
     styles: {
       default: { document: { run: { font: FONTS, size: 28, sizeComplexScript: 28 } } },
       paragraphStyles: [
@@ -798,7 +906,7 @@ async function exportWord(projectId, opts, prog = () => {}) {
     sections,
   });
   const blob = await D.Packer.toBlob(doc);
-  download(blob, `${fileBase(p)} - รายการความเสียหาย.docx`);
+  download(blob, `${fileBase(p)} - ${reportFile(opts)}.docx`);
   toast('ส่งออก Word แล้ว', 'ok');
 }
 
@@ -876,8 +984,8 @@ async function buildPdfBlocks(model, opts, urls, prog) {
   const legendHtml = `<div class="rp-legend"><b>สัญลักษณ์:</b>${legend.map(l => l.dashed ? `<i style="width:20px;border-radius:6px;border:1.5px dashed #1f3a5f;background:none"></i>${esc(l.label)}` : `<i style="background:${l.color}"></i>${esc(l.label)}`).join('')} <span style="color:#666;margin-left:10px">(วงกลม = จุด, สี่เหลี่ยม = พื้นที่)</span></div>`;
   if (opts.cover) {
     const cov = p.coverBlobId ? await photoUrl(p.coverBlobId, urls) : '';
-    const info = [['รหัสงาน', p.code], ['ผู้ว่าจ้าง', p.client], ['สถานที่ตั้ง', p.location], ['ผู้ตรวจสอบ', p.inspector], ['วันที่ตรวจสอบ', thaiDateLong(p.inspectDate)], ['จำนวนตำแหน่งที่พบ', `${model.items.length} ตำแหน่ง`]].filter(r => r[1]);
-    blocks.push({ page: 'cover', html: `<div class="rp-cover" style="--acc:${esc(p.accent)}"><div class="t1">รายการความเสียหาย-ข้อบกพร่อง</div><div class="t2">ของโครงการ</div><div class="t3">${esc(p.name)}</div>
+    const info = [['รหัสงาน', p.code], ['ผู้ว่าจ้าง', p.client], ['สถานที่ตั้ง', p.location], ['ผู้ตรวจสอบ', p.inspector], ['วันที่ตรวจสอบ', thaiDateLong(p.inspectDate)], ['จำนวนตำแหน่งที่พบ', opts.noDefects ? '' : `${model.items.length} ตำแหน่ง`]].filter(r => r[1]);
+    blocks.push({ page: 'cover', html: `<div class="rp-cover" style="--acc:${esc(p.accent)}"><div class="t1" style="${reportTitle(opts).length > 34 ? 'font-size:30px' : ''}">${esc(reportTitle(opts))}</div><div class="t2">ของโครงการ</div><div class="t3">${esc(p.name)}</div>
       ${cov ? `<img src="${cov}">` : ''}<div class="info">${info.map(([k, v]) => `<b>${esc(k)} :</b> ${esc(v)}`).join('<br>')}</div>${opts.org ? `<div class="org">${esc(opts.org)}</div>` : ''}</div>` });
   }
   if (opts.summary) {
@@ -955,7 +1063,7 @@ async function paginate(blocks, host, headText) {
       continue;
     }
     if (b.page === 'cover') { newPage('cover'); body.innerHTML = b.html; await waitImages(body); body = null; curKind = 'cover'; continue; }
-    const want = b.page === 'land' ? 'land' : 'port';
+    const want = b.page === 'land' || b.page === 'landc' ? 'land' : 'port'; // 'landc' = landscape, continue on the current page
     if (!body || curKind !== want || ((b.page === 'new' || b.page === 'land') && body.childNodes.length)) { newPage(want); curKind = want; }
     const el = h(`<div>${b.html}</div>`);
     body.appendChild(el);
@@ -970,7 +1078,7 @@ async function paginate(blocks, host, headText) {
       let tb = mk();
       for (const r of rows) {
         tb.appendChild(r);
-        if (over() && tb.children.length > 1) { r.remove(); newPage('port'); curKind = 'port'; tb = mk(); tb.appendChild(r); }
+        if (over() && tb.children.length > 1) { r.remove(); const k = curKind === 'land' ? 'land' : 'port'; newPage(k); curKind = k; tb = mk(); tb.appendChild(r); }
       }
     } else if (body.childNodes.length > 1) {
       el.remove(); newPage(curKind === 'land' ? 'land' : 'port'); body.appendChild(el);
@@ -980,12 +1088,29 @@ async function paginate(blocks, host, headText) {
   return pages;
 }
 
-async function exportPdf(projectId, opts, prog = () => {}) {
+async function exportPdf(projectId, opts0, prog = () => {}) {
+  const opts = opts0.noDefects ? { ...opts0, summary: false, plans: false, groups: false, table: false, perPoint: false } : opts0;
   await ensureFonts();
   const model = await buildModel(projectId, opts.floorIds, opts.filter);
   const p = model.project;
   const urls = {};
   const blocks = await buildPdfBlocks(model, opts, urls, prog);
+  if (opts.tests) {
+    const tm = await testModelFor(projectId, opts);
+    if (tm.types.length) blocks.push(...await testPdfBlocks(tm, { ...opts.testOpts, testMerge: opts.tests.merge, org: opts.org, planPaper: opts.planPaper, planDpi: opts.planDpi, marker: opts.marker }, urls, prog, { planPage, canvasBlob }));
+  }
+  if (!blocks.length) throw new Error('ไม่มีข้อมูลในหมวดที่เลือก');
+  const headText = `${opts.org ? opts.org + '  |  ' : ''}${reportTitle(opts)} โครงการ ${p.name}`;
+  if (opts.direct) { // no preview: build the pages off-screen and hand over the file (used when exporting several files at once)
+    const view = h(`<div class="report-view" style="position:fixed;left:-20000px;top:0;opacity:0;pointer-events:none"><style>${rpCss()}</style><div class="report-pages" id="rpPages"></div></div>`);
+    document.body.appendChild(view);
+    try {
+      const pages = await paginate(blocks, $('#rpPages', view), headText);
+      const blob = await pagesToPdf(pages, `${reportTitle(opts)} ${p.name}`, (i, n) => prog(`กำลังสร้าง PDF หน้า ${i}/${n}`, 0.9));
+      download(blob, `${fileBase(p)} - ${reportFile(opts)}.pdf`);
+    } finally { view.remove(); Object.values(urls).forEach(u => u && URL.revokeObjectURL(u)); }
+    return 1;
+  }
   prog('กำลังจัดหน้า', 0.88);
   const view = h(`<div class="report-view"><style>${rpCss()}</style>
     <div class="report-bar"><div class="t"><b>ตัวอย่าง PDF</b> — ${esc(p.name)} <span id="rpCount" style="opacity:.7"></span></div>
@@ -994,7 +1119,7 @@ async function exportPdf(projectId, opts, prog = () => {}) {
       <button class="btn sm" id="rpClose">ปิด</button></div>
     <div class="report-pages" id="rpPages"></div></div>`);
   document.body.appendChild(view);
-  const pages = await paginate(blocks, $('#rpPages', view), `${opts.org ? opts.org + '  |  ' : ''}รายการความเสียหาย-ข้อบกพร่อง โครงการ ${p.name}`);
+  const pages = await paginate(blocks, $('#rpPages', view), headText);
   $('#rpCount', view).textContent = `(${pages.length} หน้า)`;
   const close = () => { view.remove(); Object.values(urls).forEach(u => u && URL.revokeObjectURL(u)); };
   $('#rpClose', view).onclick = close;
@@ -1002,44 +1127,55 @@ async function exportPdf(projectId, opts, prog = () => {}) {
   $('#rpDl', view).onclick = async (e) => {
     const btn = e.currentTarget; btn.disabled = true;
     try {
-      await loadScript('vendor/html2canvas.min.js');
-      await loadScript('vendor/jspdf.umd.min.js');
-      const { jsPDF } = window.jspdf;
-      let pdf = null;
-      for (let i = 0; i < pages.length; i++) {
-        btn.textContent = `กำลังสร้าง ${i + 1}/${pages.length}…`;
-        const pg = pages[i];
-        const land = pg.classList.contains('land');
-        const a3 = pg.classList.contains('a3');
-        const orient = land ? 'landscape' : 'portrait';
-        const big = a3 && !pg.classList.contains('pa4');
-        const fmt = big ? 'a3' : 'a4';
-        const [pw, ph] = big ? (land ? [420, 297] : [297, 420]) : (land ? [297, 210] : [210, 297]);
-        let dataUrl;
-        if (a3) {
-          const pn = $('.rp-foot', pg)?.textContent || '';
-          const img = $('.a3img', pg);
-          const c = document.createElement('canvas'); c.width = img.naturalWidth; c.height = img.naturalHeight;
-          const cx = c.getContext('2d'); cx.drawImage(img, 0, 0);
-          if (pn) { const s = c.width / pw; cx.font = `400 ${2.8 * s}px Sarabun, sans-serif`; cx.fillStyle = '#777'; cx.textAlign = 'right'; cx.fillText(pn, c.width - 12 * s, c.height - 5 * s); }
-          dataUrl = c.toDataURL('image/jpeg', 0.93); c.width = c.height = 0;
-        } else {
-          const shadow = pg.style.boxShadow; pg.style.boxShadow = 'none';
-          const c = await html2canvas(pg, { scale: 2, backgroundColor: '#ffffff', useCORS: true, logging: false });
-          pg.style.boxShadow = shadow;
-          dataUrl = c.toDataURL('image/jpeg', 0.9);
-        }
-        if (!pdf) pdf = new jsPDF({ orientation: orient, unit: 'mm', format: fmt, compress: true });
-        else pdf.addPage(fmt, orient);
-        pdf.addImage(dataUrl, 'JPEG', 0, 0, pw, ph, undefined, 'FAST');
-      }
-      pdf.setProperties({ title: `รายการความเสียหาย-ข้อบกพร่อง ${p.name}` });
-      download(pdf.output('blob'), `${fileBase(p)} - รายการความเสียหาย.pdf`);
+      const blob = await pagesToPdf(pages, `${reportTitle(opts)} ${p.name}`, (i, n) => { btn.textContent = `กำลังสร้าง ${i}/${n}…`; });
+      download(blob, `${fileBase(p)} - ${reportFile(opts)}.pdf`);
       toast('ดาวน์โหลด PDF แล้ว', 'ok');
     } catch (err) { console.error(err); toast('สร้าง PDF ไม่สำเร็จ: ' + err.message, 'error', 6000); }
     btn.disabled = false; btn.textContent = '⤓ ดาวน์โหลดไฟล์ PDF';
   };
   return pages.length;
+}
+
+async function pagesToPdf(pages, title, onPage = () => {}) {
+  await loadScript('vendor/html2canvas.min.js');
+  await loadScript('vendor/jspdf.umd.min.js');
+  const { jsPDF } = window.jspdf;
+  let pdf = null;
+  for (let i = 0; i < pages.length; i++) {
+    onPage(i + 1, pages.length);
+    const pg = pages[i];
+    const land = pg.classList.contains('land');
+    const a3 = pg.classList.contains('a3');
+    const orient = land ? 'landscape' : 'portrait';
+    const big = a3 && !pg.classList.contains('pa4');
+    const fmt = big ? 'a3' : 'a4';
+    const [pw, ph] = big ? (land ? [420, 297] : [297, 420]) : (land ? [297, 210] : [210, 297]);
+    let dataUrl;
+    if (a3) {
+      const pn = $('.rp-foot', pg)?.textContent || '';
+      const img = $('.a3img', pg);
+      const c = document.createElement('canvas'); c.width = img.naturalWidth; c.height = img.naturalHeight;
+      const cx = c.getContext('2d'); cx.drawImage(img, 0, 0);
+      if (pn) { const s = c.width / pw; cx.font = `400 ${2.8 * s}px Sarabun, sans-serif`; cx.fillStyle = '#777'; cx.textAlign = 'right'; cx.fillText(pn, c.width - 12 * s, c.height - 5 * s); }
+      dataUrl = c.toDataURL('image/jpeg', 0.93); c.width = c.height = 0;
+    } else {
+      const shadow = pg.style.boxShadow; pg.style.boxShadow = 'none';
+      const c = await html2canvas(pg, { scale: 2, backgroundColor: '#ffffff', useCORS: true, logging: false });
+      pg.style.boxShadow = shadow;
+      dataUrl = c.toDataURL('image/jpeg', 0.9);
+    }
+    if (!pdf) pdf = new jsPDF({ orientation: orient, unit: 'mm', format: fmt, compress: true });
+    else pdf.addPage(fmt, orient);
+    pdf.addImage(dataUrl, 'JPEG', 0, 0, pw, ph, undefined, 'FAST');
+  }
+  pdf.setProperties({ title });
+  return pdf.output('blob');
+}
+
+async function testModelFor(projectId, opts) {
+  const tm = await buildTestModel(projectId, opts.floorIds);
+  tm.types = tm.types.filter(t => opts.tests.types.includes(t.id));
+  return tm;
 }
 
 // =====================================================================================

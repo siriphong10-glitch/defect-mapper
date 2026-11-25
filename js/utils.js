@@ -111,7 +111,10 @@ export async function compressImage(fileOrBlob, maxDim = 1800, quality = 0.85, t
   } finally { URL.revokeObjectURL(url); }
 }
 
+// when `files` is an array, downloads are collected instead (used to bundle several exports into one .zip)
+export const downloadCapture = { files: null };
 export function download(blob, filename) {
+  if (downloadCapture.files) { downloadCapture.files.push({ blob, name: filename }); return; }
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = filename;

@@ -177,6 +177,13 @@ async function exportXlsx(model, opts, prog) {
   prog('กำลังเตรียมข้อมูล', 0.2);
   await loadScript('vendor/xlsx.full.min.js');
   const wb = XLSX.utils.book_new();
+  addTestSheets(wb, model, opts);
+  download(new Blob([XLSX.write(wb, { type: 'array', bookType: 'xlsx' })], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), `${base(model.project)} - ผลทดสอบ${opts.subject ? ' ' + safeName(opts.subject) : ''}.xlsx`);
+  toast('ส่งออก Excel แล้ว', 'ok');
+}
+
+// test sheets (one per test type + summary + criteria) appended to a workbook
+export function addTestSheets(wb, model, opts, prefix = '') {
   const summary = [['การทดสอบ', 'จำนวนจุด', ...Object.values(LEVEL).map(l => l.text)]];
   const lvKeys = Object.keys(LEVEL);
   const used = new Set();
@@ -185,22 +192,20 @@ async function exportXlsx(model, opts, prog) {
     const aoa = [[t.label], [], tbl.columns.map(colHead), ...tbl.rows.map(r => tbl.columns.map(c => { const v = r.cells[c.key]; return v !== '' && !isNaN(+v) && typeof v !== 'boolean' && !String(v).includes(' ') ? +v : v; }))];
     const ws = XLSX.utils.aoa_to_sheet(aoa);
     ws['!cols'] = tbl.columns.map(c => ({ wch: Math.min(40, Math.max(6, colHead(c).length + 1, ...tbl.rows.map(r => String(r.cells[c.key] ?? '').length + 1))) }));
-    let name = t.short.replace(/[\\/?*[\]:]/g, '').slice(0, 28); while (used.has(name)) name += '_'; used.add(name);
+    let name = (prefix + t.short).replace(/[\\/?*[\]:]/g, '').slice(0, 28); while (used.has(name) || wb.SheetNames.includes(name)) name += '_'; used.add(name);
     XLSX.utils.book_append_sheet(wb, ws, name);
     summary.push([t.short, tbl.rows.length, ...lvKeys.map(k => tbl.rows.filter(r => r.level === k).length)]);
   }
   const ws = XLSX.utils.aoa_to_sheet(summary);
   ws['!cols'] = [{ wch: 18 }, { wch: 10 }, ...lvKeys.map(() => ({ wch: 14 }))];
-  XLSX.utils.book_append_sheet(wb, ws, 'สรุป');
+  XLSX.utils.book_append_sheet(wb, ws, prefix ? 'สรุปผลทดสอบ' : 'สรุป');
   const crit = [['การทดสอบ', 'กลุ่ม', 'ช่วงค่า', 'ผลการประเมิน', 'ระดับ']];
   model.types.forEach(t => {
     criteriaLines(t).forEach(l => crit.push([t.short, '', l, '', '']));
     bandRows(t).forEach(b => crit.push([t.short, b.variant, b.range, b.label, LEVEL[b.level]?.text || '']));
   });
   const wc = XLSX.utils.aoa_to_sheet(crit); wc['!cols'] = [{ wch: 14 }, { wch: 14 }, { wch: 60 }, { wch: 34 }, { wch: 12 }];
-  XLSX.utils.book_append_sheet(wb, wc, 'เกณฑ์ที่ใช้');
-  XLSX.writeFile(wb, `${base(model.project)} - ผลทดสอบ.xlsx`);
-  toast('ส่งออก Excel แล้ว', 'ok');
+  XLSX.utils.book_append_sheet(wb, wc, prefix ? 'เกณฑ์ทดสอบที่ใช้' : 'เกณฑ์ที่ใช้');
 }
 
 // ------------------------------------------------------------------ Word
@@ -210,11 +215,28 @@ async function exportWordTables(model, opts, prog) {
   prog('กำลังโหลดไลบรารี', 0.05);
   await loadScript('vendor/docx.iife.js');
   const D = window.docx;
+  const p = model.project;
+  const sections = await testWordSections(model, opts, prog, D);
+  prog('กำลังรวมไฟล์ Word', 0.97);
+  const doc = new D.Document({
+    creator: opts.org || 'Inspect Recorder', title: `ผลการทดสอบ ${p.name}`,
+    styles: { default: { document: { run: { font: FONTS, size: 28, sizeComplexScript: 28 } } },
+      paragraphStyles: [{ id: 'Heading1', name: 'Heading 1', basedOn: 'Normal', next: 'Normal', quickFormat: true, run: { font: FONTS, size: 34, sizeComplexScript: 34, bold: true, boldComplexScript: true, color: '1F3A5F' } },
+        { id: 'Heading2', name: 'Heading 2', basedOn: 'Normal', next: 'Normal', quickFormat: true, run: { font: FONTS, size: 30, sizeComplexScript: 30, bold: true, boldComplexScript: true } }] },
+    sections,
+  });
+  download(await D.Packer.toBlob(doc), `${base(p)} - ผลทดสอบ${opts.subject ? ' ' + safeName(opts.subject) : ''}.docx`);
+  toast('ส่งออกตารางผลทดสอบ (Word) แล้ว', 'ok');
+}
+
+// Word sections for test results — usable on their own or appended to the defect report.
+// opts.testMerge: all test types in one chapter (one plan per floor showing every station) instead of one chapter per type
+export async function testWordSections(model, opts, prog, D) {
   const { planCanvas } = await import('./export.js');
   const p = model.project;
   const PW = 11906, PH = 16838, M = 1134;
   const run = (text, o = {}) => new D.TextRun({ text: String(text ?? ''), font: o.symbol ? 'Segoe UI Symbol' : FONTS, size: o.size || 28, sizeComplexScript: o.size || 28, bold: o.bold, boldComplexScript: o.bold, color: o.color });
-  const para = (children, o = {}) => new D.Paragraph({ children: Array.isArray(children) ? children : [run(children, o)], alignment: o.align, spacing: { before: o.before ?? 0, after: o.after ?? 0 }, heading: o.heading, keepNext: o.keepNext });
+  const para = (children, o = {}) => new D.Paragraph({ children: Array.isArray(children) ? children : [run(children, o)], alignment: o.align, spacing: { before: o.before ?? 0, after: o.after ?? 0 }, heading: o.heading, keepNext: o.keepNext, pageBreakBefore: o.pageBreak });
   const bd = { style: D.BorderStyle.SINGLE, size: 4, color: '000000' };
   const cell = (text, o = {}) => new D.TableCell({
     children: String(text ?? '').split('\n').map(l => para(l, { size: o.size || 24, bold: o.bold, align: o.align, color: o.color })),
@@ -223,7 +245,8 @@ async function exportWordTables(model, opts, prog) {
     margins: { top: 30, bottom: 30, left: 60, right: 60 }, width: o.w ? { size: o.w, type: D.WidthType.DXA } : undefined,
   });
   const table = (rows, widths) => new D.Table({ rows, columnWidths: widths, width: { size: widths.reduce((a, b) => a + b, 0), type: D.WidthType.DXA }, layout: D.TableLayoutType.FIXED });
-  const header = () => new D.Header({ children: [para([run(`${opts.org ? opts.org + '  |  ' : ''}ผลการทดสอบ โครงการ ${p.name}`, { size: 22, color: '666666' })], { align: D.AlignmentType.RIGHT })] });
+  const headText = opts.headText || `${opts.org ? opts.org + '  |  ' : ''}ผลการทดสอบ โครงการ ${p.name}`;
+  const header = () => new D.Header({ children: [para([run(headText, { size: 22, color: '666666' })], { align: D.AlignmentType.RIGHT })] });
   const footer = () => new D.Footer({ children: [new D.Paragraph({ alignment: D.AlignmentType.RIGHT, children: [new D.TextRun({ children: ['หน้า ', D.PageNumber.CURRENT], font: FONTS, size: 22, sizeComplexScript: 22, color: '666666' })] })] });
   const section = (children, land) => ({
     properties: { page: { size: { width: PW, height: PH, orientation: land ? D.PageOrientation.LANDSCAPE : D.PageOrientation.PORTRAIT }, margin: { top: M, bottom: M, left: M, right: M } } },
@@ -234,40 +257,34 @@ async function exportWordTables(model, opts, prog) {
     const s = Math.min(maxW / c.width, maxH / c.height);
     return new D.ImageRun({ type: 'png', data: new Uint8Array(await blob.arrayBuffer()), transformation: { width: Math.round(c.width * s), height: Math.round(c.height * s) } });
   };
+  const H1 = (t) => para([run(t, { size: 34, bold: true, color: '1F3A5F' })], { heading: D.HeadingLevel.HEADING_1, after: 120, keepNext: true });
+  const H2 = (t) => para([run(t, { size: 30, bold: true })], { heading: D.HeadingLevel.HEADING_2, before: 120, after: 100, keepNext: true });
   const sections = [];
-  for (let ti = 0; ti < model.types.length; ti++) {
-    const t = model.types[ti];
-    prog(`กำลังสร้างตาราง ${t.short}`, 0.1 + 0.85 * ti / model.types.length);
-    const tbl = typeTable(model, t, { split: false, includeEmpty: opts.includeEmpty });
-    const land = tbl.columns.length > 7;
-    const CW = (land ? PH : PW) - 2 * M;
-    const children = [para([run(`ผลการทดสอบ: ${t.label}`, { size: 34, bold: true, color: '1F3A5F' })], { heading: D.HeadingLevel.HEADING_1, after: 120, keepNext: true }),
-      para([run(`จำนวน ${tbl.rows.length} จุด`, { size: 26, color: '555555' })], { after: 120 })];
-    if (opts.plans) {
-      // location plans on A3 or A4 pages (one per floor), the result table stays on A4
-      for (const f of model.floors) {
-        const sts = tbl.rows.filter(r => model.floorOf(r.station)?.id === f.id);
-        if (!sts.length) continue;
-        const items = sts.map(r => ({ d: { shape: 'point', pts: r.station.pts }, over: r.station._over, no: codeOf(r.station, t.id), color: levelColor(r.level) === '#ffffff' ? '#64748b' : levelColor(r.level) }));
-        const a4 = opts.planPaper === 'A4';
-        const [lw, sw] = a4 ? [297, 210] : [420, 297];
-        const pl = f.w >= f.h, pw = pl ? lw : sw, ph = pl ? sw : lw;
-        const boxMm = [pw - 40, ph - 40 - 24];
-        const c = await planCanvas(f, items, { boxMm, dpi: opts.planDpi || 300, markerScale: 1 });
-        const mmPx = (v) => v / 25.4 * 96;
-        sections.push({
-          properties: { page: { size: { width: a4 ? 11906 : 16838, height: a4 ? 16838 : 23811, orientation: pl ? D.PageOrientation.LANDSCAPE : D.PageOrientation.PORTRAIT }, margin: { top: M, bottom: M, left: M, right: M } } },
-          headers: { default: header() }, footers: { default: footer() },
-          children: [...(sections.length && sections.at(-1)._type === t.id ? [] : children.splice(0)),
-            para([run(`ตำแหน่งจุดทดสอบ ${t.short} — ${f.name}`, { size: 30, bold: true })], { after: 80, keepNext: true }),
-            para([await imgRun(c, mmPx(boxMm[0]), mmPx(boxMm[1]))], { align: D.AlignmentType.CENTER }),
-            ...(items.some(i => i.over) ? [para([run(overheadLegend(model.project, items), { size: 22, color: '555555' })], { align: D.AlignmentType.CENTER })] : [])],
-          _type: t.id,
-        });
-        c.width = c.height = 0;
-      }
+  const merged = !!opts.testMerge;
+  // one plan page per floor; `pending` = headings that open the chapter and should sit on the first plan page
+  const planSections = async (title, itemsOf, pending) => {
+    for (const f of model.floors) {
+      const items = itemsOf(f);
+      if (!items.length) continue;
+      const a4 = opts.planPaper === 'A4';
+      const [lw, sw] = a4 ? [297, 210] : [420, 297];
+      const pl = f.w >= f.h, pw = pl ? lw : sw, ph = pl ? sw : lw;
+      const boxMm = [pw - 40, ph - 40 - 24];
+      const c = await planCanvas(f, items, { boxMm, dpi: opts.planDpi || 300, markerScale: 1 });
+      const mmPx = (v) => v / 25.4 * 96;
+      sections.push({
+        properties: { page: { size: { width: a4 ? 11906 : 16838, height: a4 ? 16838 : 23811, orientation: pl ? D.PageOrientation.LANDSCAPE : D.PageOrientation.PORTRAIT }, margin: { top: M, bottom: M, left: M, right: M } } },
+        headers: { default: header() }, footers: { default: footer() },
+        children: [...pending.splice(0),
+          para([run(`${title} — ${f.name}`, { size: 30, bold: true })], { after: 80, keepNext: true }),
+          para([await imgRun(c, mmPx(boxMm[0]), mmPx(boxMm[1]))], { align: D.AlignmentType.CENTER }),
+          ...(items.some(i => i.over) ? [para([run(overheadLegend(model.project, items), { size: 22, color: '555555' })], { align: D.AlignmentType.CENTER })] : [])],
+      });
+      c.width = c.height = 0;
     }
-    // result table
+  };
+  const tableBlock = (t, tbl, CW) => {
+    const out = [];
     const fixed = { _n: 600, _code: 1000, _floor: 1200, _grade: 1700 };
     const flexCols = tbl.columns.filter(c => !fixed[c.key]);
     const rest = CW - tbl.columns.filter(c => fixed[c.key]).reduce((s, c) => s + fixed[c.key], 0);
@@ -282,33 +299,135 @@ async function exportWordTables(model, opts, prog) {
       }
       return cell(v === '' || v == null ? '-' : v, { size: 22, align: ['_n', '_code'].includes(c.key) || typeof v === 'number' || !isNaN(+v) ? D.AlignmentType.CENTER : undefined, w: widths[i] });
     }) })));
-    children.push(table(rows, widths));
+    out.push(table(rows, widths));
     if (opts.criteria) {
       const counts = {};
       tbl.rows.forEach(r => { const k = r.grade || (r.level === 'none' ? 'ยังไม่บันทึกค่า' : LEVEL[r.level]?.text); counts[k] = (counts[k] || 0) + 1; });
-      children.push(para([run('สรุปผลการประเมิน: ', { bold: true, size: 26 }), run(Object.entries(counts).map(([k, n]) => `${k} ${n} จุด`).join(' ; '), { size: 26 })], { before: 120, after: 80 }));
-      children.push(para([run('เกณฑ์ที่ใช้ประเมิน', { bold: true, size: 26 })], { after: 40, keepNext: true }));
-      criteriaLines(t).forEach(l => children.push(para([run('• ' + l, { size: 24 })], { after: 20 })));
+      out.push(para([run('สรุปผลการประเมิน: ', { bold: true, size: 26 }), run(Object.entries(counts).map(([k, n]) => `${k} ${n} จุด`).join(' ; '), { size: 26 })], { before: 120, after: 80 }));
+      out.push(para([run('เกณฑ์ที่ใช้ประเมิน', { bold: true, size: 26 })], { after: 40, keepNext: true }));
+      criteriaLines(t).forEach(l => out.push(para([run('• ' + l, { size: 24 })], { after: 20 })));
       const br = bandRows(t);
       if (br.length) {
         const hasVar = br.some(b => b.variant);
         const w2 = hasVar ? [2200, 3400, 3600, 1400] : [4400, 4200, 1400];
         const hr = new D.TableRow({ tableHeader: true, children: [...(hasVar ? ['กลุ่ม'] : []), 'ช่วงค่า', 'ผลการประเมิน', 'ระดับ'].map((x, i) => cell(x, { fill: HEAD_FILL, bold: true, align: D.AlignmentType.CENTER, size: 22, w: w2[i] })) });
         const rr = br.map(b => new D.TableRow({ children: [...(hasVar ? [b.variant] : []), b.range, b.label, LEVEL[b.level]?.text || ''].map((x, i) => cell(x, { size: 22, w: w2[i] })) }));
-        children.push(para('', { after: 60 }), table([hr, ...rr], w2));
+        out.push(para('', { after: 60 }), table([hr, ...rr], w2));
       }
     }
-    sections.push(section(children, land));
+    return out;
+  };
+  const stationColor = (lv) => (levelColor(lv) === '#ffffff' ? '#64748b' : levelColor(lv));
+
+  if (merged) {
+    // one chapter: plans with every station (all codes), then a table per test type
+    const inTypes = (s) => model.types.some(t => s.tests?.[t.id]);
+    const sts = model.stations.filter(inTypes);
+    const pending = [H1(opts.testChapter || 'ผลการทดสอบ'), para([run(`จำนวนจุดทดสอบ ${sts.length} จุด • ${model.types.map(t => t.short).join(', ')}`, { size: 26, color: '555555' })], { after: 120 })];
+    if (opts.plans) {
+      await planSections('ตำแหน่งจุดทดสอบ', (f) => sts.filter(s => model.floorOf(s)?.id === f.id).map(s => {
+        const worst = model.types.filter(t => s.tests?.[t.id]).map(t => evalTest(p, s, t.id)?.level || 'none');
+        const order = ['bad', 'warn', 'ok', 'info', 'na', 'none'];
+        const lv = order.find(k => worst.includes(k)) || 'none';
+        return { d: { shape: 'point', pts: s.pts }, over: s._over, no: model.types.filter(t => s.tests?.[t.id]).map(t => codeOf(s, t.id)).join(' / '), color: stationColor(lv) };
+      }), pending);
+    }
+    for (let ti = 0; ti < model.types.length; ti++) {
+      const t = model.types[ti];
+      prog(`กำลังสร้างตาราง ${t.short}`, 0.1 + 0.85 * ti / model.types.length);
+      const tbl = typeTable(model, t, { split: false, includeEmpty: opts.includeEmpty });
+      const land = tbl.columns.length > 7;
+      const CW = (land ? PH : PW) - 2 * M;
+      sections.push(section([...pending.splice(0), H2(`${t.label} (${tbl.rows.length} จุด)`), ...tableBlock(t, tbl, CW)], land));
+    }
+    return sections;
   }
-  prog('กำลังรวมไฟล์ Word', 0.97);
-  const doc = new D.Document({
-    creator: opts.org || 'Inspect Recorder', title: `ผลการทดสอบ ${p.name}`,
-    styles: { default: { document: { run: { font: FONTS, size: 28, sizeComplexScript: 28 } } },
-      paragraphStyles: [{ id: 'Heading1', name: 'Heading 1', basedOn: 'Normal', next: 'Normal', quickFormat: true, run: { font: FONTS, size: 34, sizeComplexScript: 34, bold: true, boldComplexScript: true, color: '1F3A5F' } }] },
-    sections: sections.map(({ _type, ...s }) => s),
-  });
-  download(await D.Packer.toBlob(doc), `${base(p)} - ผลทดสอบ.docx`);
-  toast('ส่งออกตารางผลทดสอบ (Word) แล้ว', 'ok');
+
+  for (let ti = 0; ti < model.types.length; ti++) {
+    const t = model.types[ti];
+    prog(`กำลังสร้างตาราง ${t.short}`, 0.1 + 0.85 * ti / model.types.length);
+    const tbl = typeTable(model, t, { split: false, includeEmpty: opts.includeEmpty });
+    const land = tbl.columns.length > 7;
+    const CW = (land ? PH : PW) - 2 * M;
+    const pending = [H1(`ผลการทดสอบ: ${t.label}`), para([run(`จำนวน ${tbl.rows.length} จุด`, { size: 26, color: '555555' })], { after: 120 })];
+    if (opts.plans) {
+      await planSections(`ตำแหน่งจุดทดสอบ ${t.short}`, (f) => tbl.rows.filter(r => model.floorOf(r.station)?.id === f.id)
+        .map(r => ({ d: { shape: 'point', pts: r.station.pts }, over: r.station._over, no: codeOf(r.station, t.id), color: stationColor(r.level) })), pending);
+    }
+    sections.push(section([...pending.splice(0), ...tableBlock(t, tbl, CW)], land));
+  }
+  return sections;
+}
+
+// HTML blocks for the PDF report (same structure as the Word sections)
+export async function testPdfBlocks(model, opts, urls, prog, { planPage, canvasBlob }) {
+  const p = model.project;
+  const blocks = [];
+  const merged = !!opts.testMerge;
+  const stationColor = (lv) => (levelColor(lv) === '#ffffff' ? '#64748b' : levelColor(lv));
+  const plan = async (f, items, title) => {
+    const pg = await planPage(f, items, { paper: opts.planPaper === 'A4' ? 'A4' : 'A3', dpi: opts.planDpi || 300, markerScale: opts.marker || 1,
+      legend: [...Object.entries(LEVEL).filter(([k]) => items.some(i => i.lv === k)).map(([k, l]) => ({ label: l.text, color: stationColor(k) })),
+        ...(items.some(i => i.over) ? [{ label: overheadLegend(p, items), dashed: true }] : [])],
+      title, subtitle: `${p.name} • ${items.length} จุด`, foot: opts.org || '' });
+    const blob = await canvasBlob(pg.canvas, 'image/jpeg', 0.93);
+    pg.canvas.width = pg.canvas.height = 0;
+    const u = URL.createObjectURL(blob); urls['tplan_' + Math.random()] = u;
+    blocks.push({ page: 'a3', land: pg.land, img: u, paper: pg.paper });
+  };
+  const tableHtml = (t, tbl) => {
+    let html = `<table class="rp-t" style="font-size:${tbl.columns.length > 8 ? 10.5 : 12}px"><thead><tr>${tbl.columns.map(c => `<th>${esc(colHead(c))}</th>`).join('')}</tr></thead><tbody>
+      ${tbl.rows.map(r => `<tr>${tbl.columns.map(c => { const v = r.cells[c.key];
+        if (c.key === '_grade') { const colored = r.level !== 'none' && r.level !== 'info'; return `<td class="c" style="${colored ? `background:${levelColor(r.level)};color:#fff` : ''}">${esc(v || '-')}</td>`; }
+        return `<td class="${['_n', '_code'].includes(c.key) || (v !== '' && !isNaN(+v)) ? 'c' : ''}">${esc(v === '' || v == null ? '-' : v)}</td>`; }).join('')}</tr>`).join('')}</tbody></table>`;
+    const out = [{ split: true, page: tbl.columns.length > 8 ? 'landc' : undefined, html }];
+    if (opts.criteria) {
+      const counts = {};
+      tbl.rows.forEach(r => { const k = r.grade || (r.level === 'none' ? 'ยังไม่บันทึกค่า' : LEVEL[r.level]?.text); counts[k] = (counts[k] || 0) + 1; });
+      const br = bandRows(t), hasVar = br.some(b => b.variant);
+      out.push({ page: tbl.columns.length > 8 ? 'landc' : undefined, html: `<p style="margin-top:8px"><b>สรุปผลการประเมิน:</b> ${esc(Object.entries(counts).map(([k, n]) => `${k} ${n} จุด`).join(' ; '))}</p>
+        <p style="margin:6px 0 2px"><b>เกณฑ์ที่ใช้ประเมิน</b></p>${criteriaLines(t).map(l => `<div style="font-size:13px">• ${esc(l)}</div>`).join('')}
+        ${br.length ? `<table class="rp-t" style="margin-top:6px;font-size:12px"><thead><tr>${hasVar ? '<th>กลุ่ม</th>' : ''}<th>ช่วงค่า</th><th>ผลการประเมิน</th><th>ระดับ</th></tr></thead><tbody>
+          ${br.map(b => `<tr>${hasVar ? `<td>${esc(b.variant)}</td>` : ''}<td>${esc(b.range)}</td><td>${esc(b.label)}</td><td class="c">${esc(LEVEL[b.level]?.text || '')}</td></tr>`).join('')}</tbody></table>` : ''}` });
+    }
+    return out;
+  };
+  if (merged) {
+    const sts = model.stations.filter(s => model.types.some(t => s.tests?.[t.id]));
+    if (opts.plans) {
+      const order = ['bad', 'warn', 'ok', 'info', 'na', 'none'];
+      for (const f of model.floors) {
+        const items = sts.filter(s => model.floorOf(s)?.id === f.id).map(s => {
+          const lvs = model.types.filter(t => s.tests?.[t.id]).map(t => evalTest(p, s, t.id)?.level || 'none');
+          const lv = order.find(k => lvs.includes(k)) || 'none';
+          return { d: { shape: 'point', pts: s.pts }, over: s._over, no: model.types.filter(t => s.tests?.[t.id]).map(t => codeOf(s, t.id)).join(' / '), color: stationColor(lv), lv };
+        });
+        if (items.length) await plan(f, items, `ตำแหน่งจุดทดสอบ — ${f.name}`);
+      }
+    }
+    // chapter heading after the plan pages so it does not sit alone on a page
+    blocks.push({ page: 'new', html: `<h1>${esc(opts.testChapter || 'ผลการทดสอบ')}</h1><p>จำนวนจุดทดสอบ ${sts.length} จุด • ${esc(model.types.map(t => t.short).join(', '))}</p>` });
+    for (const t of model.types) {
+      const tbl = typeTable(model, t, { split: false, includeEmpty: opts.includeEmpty });
+      blocks.push({ page: tbl.columns.length > 8 ? 'land' : undefined, html: `<h2>${esc(t.label)} (${tbl.rows.length} จุด)</h2>` }, ...tableHtml(t, tbl));
+    }
+    return blocks;
+  }
+  for (let ti = 0; ti < model.types.length; ti++) {
+    const t = model.types[ti];
+    prog(`กำลังสร้างผลทดสอบ ${t.short}`, 0.7 + 0.2 * ti / model.types.length);
+    const tbl = typeTable(model, t, { split: false, includeEmpty: opts.includeEmpty });
+    if (opts.plans) {
+      for (const f of model.floors) {
+        const items = tbl.rows.filter(r => model.floorOf(r.station)?.id === f.id)
+          .map(r => ({ d: { shape: 'point', pts: r.station.pts }, over: r.station._over, no: codeOf(r.station, t.id), color: stationColor(r.level), lv: r.level }));
+        if (items.length) await plan(f, items, `ตำแหน่งจุดทดสอบ ${t.short} — ${f.name}`);
+      }
+    }
+    blocks.push({ page: tbl.columns.length > 8 ? 'land' : 'new', html: `<h1>ผลการทดสอบ: ${esc(t.label)}</h1><p>จำนวน ${tbl.rows.length} จุด</p>` });
+    blocks.push(...tableHtml(t, tbl));
+  }
+  return blocks;
 }
 
 // ------------------------------------------------------------------ for the data pack (report.json)
