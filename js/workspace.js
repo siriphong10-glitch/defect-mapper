@@ -2,7 +2,7 @@ import { db, uid, blobUrl, forgetUrl } from './db.js';
 import { $, $$, esc, h, modal, confirmBox, promptBox, toast, pickFiles, compressImage, debounce, naturalCmp,
   loadImage, polyArea, centroid } from './utils.js';
 import { loadBundle, touch, suggestNo, isDuplicateNo, renumberAll } from './project.js';
-import { TYPE_LABELS, fieldByRole, severityInfo, NO_SEVERITY_COLOR, textOn, defectTitle } from './templates.js';
+import { TYPE_LABELS, fieldByRole, severityInfo, NO_SEVERITY_COLOR, textOn, defectTitle, groupKey } from './templates.js';
 import { dropdown, projectDialog, editLogin } from './app.js';
 import * as sync from './sync.js';
 import { prefixFor, nextCode, stationLevel, levelColor, typeDef, settingsOf, allTypes, ensureCodes, stationLabel, typePrefix, codeOf } from './tests.js';
@@ -136,8 +136,11 @@ function renderShell() {
     <div class="ws-main">
       <aside class="ws-left ${localStorage.getItem('dm_left_collapsed') === '1' ? 'collapsed' : ''}" id="left">
         <button class="ltoggle" id="lToggle" title="ซ่อน/แสดงรายการความเสียหาย ( [ )"></button>
-        <div class="lhead"><h4><span>${isTest() ? 'จุดทดสอบในชั้นนี้' : 'รายการในชั้นนี้'}</span><span class="muted" id="lcount"></span></h4>
-          <input class="inp" id="lfilter" type="text" placeholder="${isTest() ? 'ค้นหารหัส / ชนิดการทดสอบ' : 'ค้นหาเลข / หัวข้อ'}"></div>
+        <div class="lhead"><h4><span class="seg lscope" id="lScope"><button type="button" data-scope="floor" class="${listScope() === 'floor' ? 'on' : ''}">ชั้นนี้</button><button type="button" data-scope="all" class="${listScope() === 'all' ? 'on' : ''}">ทั้งโครงการ</button></span><span class="muted" id="lcount"></span></h4>
+          <div class="lrow"><input class="inp" id="lfilter" type="text" placeholder="${isTest() ? 'ค้นหารหัส / ชนิดการทดสอบ' : 'ค้นหาเลข / หัวข้อ'}">
+          <select class="inp" id="lsort" title="การเรียงรายการ">${(isTest()
+            ? [['no', 'เรียงตามรหัส'], ['test', 'จัดกลุ่มตามการทดสอบ']]
+            : [['no', 'เรียงตามเลข'], ['cat', 'จัดกลุ่มตามหมวดงาน'], ['title', 'จัดกลุ่มตามหัวข้อ']]).map(([v, l]) => `<option value="${v}" ${listSort() === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div></div>
         <div class="dlist" id="dlist"></div>
       </aside>
       <div class="ws-canvas" id="canvas"></div>
@@ -199,6 +202,11 @@ function renderShell() {
     { label: '⤓ ส่งออกแพ็กข้อมูล / สำรอง (.zip)', fn: async () => { const { exportPack } = await import('./export.js'); exportPack(P().id); } },
   ]);
   $('#lfilter').oninput = (e) => { S.filter = e.target.value; renderList(); };
+  $$('#lScope [data-scope]').forEach(b => b.onclick = () => {
+    try { localStorage.setItem('dm_list_scope', b.dataset.scope); } catch { /* */ }
+    $$('#lScope button').forEach(x => x.classList.toggle('on', x === b)); renderList();
+  });
+  $('#lsort').onchange = (e) => { try { localStorage.setItem(isTest() ? 'dm_list_sort_t' : 'dm_list_sort', e.target.value); } catch { /* */ } renderList(); };
   $('#lToggle').onclick = toggleLeft;
   renderTitle();
   renderTools();
@@ -627,49 +635,95 @@ async function replaceFloorImage(f) {
 }
 
 // ===================================================================== list
+// left list: this floor or the whole project, plain or grouped
+const listScope = () => (localStorage.getItem('dm_list_scope') === 'all' ? 'all' : 'floor');
+const listSort = () => localStorage.getItem(isTest() ? 'dm_list_sort_t' : 'dm_list_sort') || 'no';
+const scopeItems = () => (listScope() === 'all' ? curItems().filter(d => S.floors.some(f => f.id === d.floorId)) : floorDefects());
+const floorName = (id) => S.floors.find(f => f.id === id)?.name || '';
+// work category of a defect for grouping: structural form → งานโครงสร้าง, general form → its หมวดงาน
+function workCat(d) {
+  if ((d.type || 'structural') === 'structural') return 'งานโครงสร้าง';
+  const f = fieldByRole(tplOf(d), 'element');
+  return (f && d.data?.[f.key]) || 'ไม่ระบุหมวดงาน';
+}
+// split a list into [{label, items}] following the chosen grouping (one unlabeled group when not grouping)
+function groupList(list, keyOf, labelOf, orderOf = () => 0) {
+  const m = new Map();
+  for (const d of list) { const k = keyOf(d); if (!m.has(k)) m.set(k, { label: labelOf(d, k), items: [], ord: orderOf(d, k) }); m.get(k).items.push(d); }
+  return [...m.values()].sort((a, b) => a.ord - b.ord || naturalCmp(a.items[0].no ?? a.items[0].code, b.items[0].no ?? b.items[0].code));
+}
+async function openItem(d) {
+  if (d.floorId !== S.floorId) await selectFloor(d.floorId);
+  select(d.id); centerOn(d);
+}
+function groupHead(box, g) {
+  box.appendChild(h(`<div class="lgroup"><span>${esc(g.label)}</span><span class="muted">${g.items.length}</span></div>`));
+}
+
 function renderList() {
   if (isTest()) return renderTestList();
   const box = $('#dlist');
-  const all = floorDefects();
-  $('#lcount').textContent = `${all.length} จุด`;
+  const all = scopeItems();
+  const wide = listScope() === 'all';
+  $('#lcount').textContent = `${all.length} จุด${wide ? ` • ${new Set(all.map(d => d.floorId)).size} ชั้น` : ''}`;
   const q = S.filter.trim().toLowerCase();
-  const list = all.filter(d => !q || `${d.no} ${defectTitle(P(), d)}`.toLowerCase().includes(q))
+  const list = all.filter(d => !q || `${d.no} ${defectTitle(P(), d)} ${wide ? floorName(d.floorId) : ''}`.toLowerCase().includes(q))
     .sort((a, b) => naturalCmp(a.no, b.no));
   box.innerHTML = '';
-  for (const d of list) {
+  const mode = listSort();
+  const catOrder = (d, k) => (k === 'งานโครงสร้าง' ? 0 : /ระบบ|ไฟฟ้า|สุขาภิบาล|ประปา|ปรับอากาศ|อัคคีภัย|ลิฟต์/.test(k) ? 1 : k === 'ไม่ระบุหมวดงาน' ? 3 : 2);
+  const groups = mode === 'cat' ? groupList(list, workCat, (d, k) => k, catOrder)
+    : mode === 'title' ? groupList(list, (d) => groupKey(P(), d), (d) => defectTitle(P(), d))
+      : [{ label: '', items: list }];
+  for (const g of groups) {
+    if (g.label) groupHead(box, g);
+  for (const d of g.items) {
     const tpl = tplOf(d);
     const col = defectColor(P(), d);
     const elf = fieldByRole(tpl, 'element'), sf = fieldByRole(tpl, 'severity');
-    const meta = [isOverhead(d) ? '⬆ เหนือศีรษะ' : '', elf && d.data?.[elf.key], sf && d.data?.[sf.key], d.photoIds?.length ? `📷 ${d.photoIds.length}` : ''].filter(Boolean).join(' • ');
+    const meta = [wide ? floorName(d.floorId) : '', isOverhead(d) ? '⬆ เหนือศีรษะ' : '', elf && d.data?.[elf.key], sf && d.data?.[sf.key], d.photoIds?.length ? `📷 ${d.photoIds.length}` : ''].filter(Boolean).join(' • ');
     const it = h(`<div class="ditem ${d.id === S.selectedId ? 'on' : ''}">
       <span class="badge ${d.shape !== 'point' ? 'area' : ''}" style="background:${col};color:${textOn(col)}">${esc(d.no)}</span>
       <div class="txt"><div class="t1">${esc(defectTitle(P(), d))}</div><div class="t2">${esc(meta || TYPE_LABELS[d.type])}</div></div></div>`);
-    it.onclick = () => { select(d.id); centerOn(d); };
+    it.onclick = () => openItem(d);
     box.appendChild(it);
   }
-  if (!all.length) box.appendChild(h(`<div class="muted" style="font-size:13px;padding:10px">${S.floors.length ? 'ยังไม่มีจุดในชั้นนี้ เลือกเครื่องมือ “ปักจุด” หรือ “พื้นที่” ด้านล่าง' : ''}</div>`));
+  }
+  if (!all.length) box.appendChild(h(`<div class="muted" style="font-size:13px;padding:10px">${S.floors.length ? (wide ? 'ยังไม่มีจุดในโครงการนี้' : 'ยังไม่มีจุดในชั้นนี้ เลือกเครื่องมือ “ปักจุด” หรือ “พื้นที่” ด้านล่าง') : ''}</div>`));
   const on = $('.ditem.on', box);
   if (on) on.scrollIntoView({ block: 'nearest' });
 }
 
 function renderTestList() {
   const box = $('#dlist');
-  const all = floorDefects();
-  $('#lcount').textContent = `${all.length} จุด`;
+  const all = scopeItems();
+  const wide = listScope() === 'all';
+  $('#lcount').textContent = `${all.length} จุด${wide ? ` • ${new Set(all.map(d => d.floorId)).size} ชั้น` : ''}`;
   const q = S.filter.trim().toLowerCase();
-  const list = all.filter(d => !q || `${stationLabel(d)} ${Object.keys(d.tests || {}).map(id => typeDef(P(), id)?.short).join(' ')} ${d.element || ''} ${d.place || ''}`.toLowerCase().includes(q))
+  const list = all.filter(d => !q || `${stationLabel(d)} ${Object.keys(d.tests || {}).map(id => typeDef(P(), id)?.short).join(' ')} ${d.element || ''} ${d.place || ''} ${wide ? floorName(d.floorId) : ''}`.toLowerCase().includes(q))
     .sort((a, b) => naturalCmp(a.code, b.code));
   box.innerHTML = '';
-  for (const d of list) {
+  let groups = [{ label: '', items: list }];
+  if (listSort() === 'test') {
+    // a station with several tests is listed under each of its tests
+    const types = allTypes(P(), { includeHidden: true });
+    groups = types.map(t => ({ label: t.short, items: list.filter(d => d.tests?.[t.id]).sort((a, b) => naturalCmp(codeOf(a, t.id), codeOf(b, t.id))) })).filter(g => g.items.length);
+    const none = list.filter(d => !Object.keys(d.tests || {}).length);
+    if (none.length) groups.push({ label: 'ยังไม่เลือกการทดสอบ', items: none });
+  }
+  for (const g of groups) {
+    if (g.label) groupHead(box, g);
+  for (const d of g.items) {
     const lv = stationLevel(P(), d);
-    const meta = [isOverhead(d) ? '⬆ เหนือศีรษะ' : '', d.element, d.place, d.role === 'baseline' ? 'จุดอ้างอิง' : d.role === 'targeted' ? 'จุดเจาะจง' : ''].filter(Boolean).join(' • ');
+    const meta = [wide ? floorName(d.floorId) : '', isOverhead(d) ? '⬆ เหนือศีรษะ' : '', d.element, d.place, d.role === 'baseline' ? 'จุดอ้างอิง' : d.role === 'targeted' ? 'จุดเจาะจง' : ''].filter(Boolean).join(' • ');
     const it = h(`<div class="ditem ${d.id === S.selectedId ? 'on' : ''}">
       <span class="badge tbadge" style="background:${levelColor(lv)};color:${lv === 'none' ? 'var(--ink)' : '#fff'}">◆</span>
       <div class="txt"><div class="t1">${esc(stationLabel(d))}${meta ? ` <span class="t2" style="font-weight:400">${esc(meta)}</span>` : ''}</div><div class="tchips">${stationChips(P(), d)}</div></div></div>`);
-    it.onclick = () => { select(d.id); centerOn(d); };
+    it.onclick = () => openItem(d);
     box.appendChild(it);
   }
-  if (!all.length) box.appendChild(h(`<div class="muted" style="font-size:13px;padding:10px">${S.floors.length ? 'ยังไม่มีจุดทดสอบในชั้นนี้ เลือกเครื่องมือ “ปักจุดทดสอบ” ด้านล่าง' : ''}</div>`));
+  }
+  if (!all.length) box.appendChild(h(`<div class="muted" style="font-size:13px;padding:10px">${S.floors.length ? wide ? 'ยังไม่มีจุดทดสอบในโครงการนี้' : 'ยังไม่มีจุดทดสอบในชั้นนี้ เลือกเครื่องมือ “ปักจุดทดสอบ” ด้านล่าง' : ''}</div>`));
   const on = $('.ditem.on', box);
   if (on) on.scrollIntoView({ block: 'nearest' });
 }

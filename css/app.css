@@ -454,3 +454,12 @@ body:has(.ws-right:not(.closed)) .credit { right: calc(30% + 14px); }
   .home-top .inner .spacer { flex-basis: 100%; height: 0; }
   .home-top .inner .btn { padding-left: 10px; padding-right: 10px; }
 }
+
+/* left list: scope toggle, sort and group headings */
+.ws-left .lhead .lscope { display: inline-flex; width: auto; }
+.ws-left .lhead .lscope button { padding: 3px 10px; font-size: 12.5px; white-space: nowrap; }
+.ws-left .lhead .lrow { display: flex; gap: 6px; margin-top: 8px; }
+.ws-left .lhead .lrow input { margin-top: 0; flex: 1; min-width: 0; }
+.ws-left .lhead .lrow select { width: auto; max-width: 46%; padding: 4px 6px; font-size: 12.5px; }
+.lgroup { display: flex; justify-content: space-between; gap: 6px; padding: 8px 8px 3px; margin-top: 4px; font-size: 12.5px; font-weight: 700; color: var(--navy-2, #1f3a5f); border-bottom: 1px solid var(--line-2); position: sticky; top: 0; background: var(--panel); z-index: 1; }
+.lgroup:first-child { margin-top: 0; }
