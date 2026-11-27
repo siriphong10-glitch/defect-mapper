@@ -2,7 +2,7 @@ import { db, uid, blobUrl, forgetUrl } from './db.js';
 import { $, $$, esc, h, modal, confirmBox, promptBox, toast, pickFiles, compressImage, debounce, naturalCmp,
   loadImage, polyArea, centroid } from './utils.js';
 import { loadBundle, touch, suggestNo, isDuplicateNo, renumberAll } from './project.js';
-import { TYPE_LABELS, fieldByRole, severityInfo, NO_SEVERITY_COLOR, textOn, defectTitle, groupKey } from './templates.js';
+import { TYPE_LABELS, fieldByRole, severityInfo, NO_SEVERITY_COLOR, textOn, defectTitle, groupKey, parseQty, fmtQty, repairQty, QTY_UNITS } from './templates.js';
 import { dropdown, projectDialog, editLogin } from './app.js';
 import * as sync from './sync.js';
 import { prefixFor, nextCode, stationLevel, levelColor, typeDef, settingsOf, allTypes, ensureCodes, stationLabel, typePrefix, codeOf } from './tests.js';
@@ -1122,7 +1122,7 @@ async function onUp(e) {
   if (!g || !S.img) return;
   const w = toWorld(e);
   if (g.type === 'move' || g.type === 'vertex') {
-    if (g.moved) { await db.put('defects', g.d); renderRight(true); }
+    if (g.moved) { if (g.type === 'vertex' && !isTest()) autoSize(g.d); await db.put('defects', g.d); renderRight(true); }
     else select(g.d.id);
     return;
   }
@@ -1317,12 +1317,28 @@ async function createDefect(shape, pts) {
   };
   if (S.copyPrev && prev) { d.type = prev.type; d.data = JSON.parse(JSON.stringify(prev.data || {})); }
   if (S.overhead && canOverhead(d)) d.pos = 'above';
+  autoSize(d);
   await db.put('defects', d);
   S.defects.push(d);
   S.lastCreatedId = d.id;
   await touch(p);
   S.selectedId = d.id;
   renderTabs(); renderList(); renderPins(); renderRight(); updateHint();
+}
+
+// area drawn on a scaled plan → size field in ตร.ม. (kept editable; stops following the shape once edited by hand)
+function autoSize(d) {
+  if (d.shape === 'point') return false;
+  const floor = S.floors.find(f => f.id === d.floorId);
+  const a = floor ? defectAreaM2(floor, d) : null;
+  const sf = fieldByRole(tplOf(d), 'size');
+  if (a == null || !sf) return false;
+  const cur = d.data?.[sf.key] || '';
+  if (cur && !d.sizeAuto) return false;
+  const next = fmtQty(a, 'ตร.ม.');
+  if (cur === next) return false;
+  d.data = d.data || {}; d.data[sf.key] = next; d.sizeAuto = true;
+  return true;
 }
 
 function select(id) {
@@ -1433,7 +1449,7 @@ function renderRight(keepScroll = false) {
   if ($('#useArea')) $('#useArea').onclick = () => {
     const sf = fieldByRole(tpl, 'size');
     if (!sf) return;
-    d.data[sf.key] = dims ? `${dims[0].toFixed(2)} x ${dims[1].toFixed(2)} ม. (${area.toFixed(2)} ตร.ม.)` : `${area.toFixed(2)} ตร.ม.`;
+    d.data[sf.key] = fmtQty(area, 'ตร.ม.'); d.sizeAuto = true;
     saveSel(d); renderRight(true);
   };
   $$('[data-type]', box).forEach(b => b.onclick = () => {
@@ -1517,6 +1533,30 @@ function renderFields(box, d, tpl) {
         const nb = h('<div></div>'); el.replaceWith(nb); // re-render this field only
         const tmp = h('<div></div>'); renderFields(tmp, d, { fields: [f] }); nb.replaceWith(tmp.firstElementChild);
       });
+    } else if (f.role === 'size' && (f.kind === 'text' || f.kind === 'qty')) {
+      // number + unit (ตร.ม. / ม.); stored as text "0.45 ตร.ม."
+      const q = parseQty(v);
+      let unit = q.u || 'ตร.ม.';
+      const legacy = q.raw && q.v == null ? q.raw : '';
+      el = h(`<div class="fld">${lab}<div class="qty-row"><input type="text" inputmode="decimal" data-kp="1" class="qty-num" value="${q.v != null ? +q.v.toFixed(2) : ''}" placeholder="0.00">
+        <div class="seg qty-unit">${QTY_UNITS.map(u => `<button type="button" data-u="${u}" class="${u === unit ? 'on' : ''}">${u}</button>`).join('')}</div></div>
+        ${legacy ? `<span class="hint">ค่าเดิมที่พิมพ์ไว้: “${esc(legacy)}” — กรอกตัวเลขใหม่เพื่อแทนที่</span>` : ''}
+        ${d.sizeAuto ? '<span class="hint">ค่าจากพื้นที่ที่วาดบนแปลน — แก้ตัวเลขได้ตามดุลยพินิจ</span>' : ''}
+        <span class="hint qty-repair"></span></div>`);
+      const inp = $('input', el);
+      const repairHint = () => {
+        const n = parseFloat(inp.value);
+        $('.qty-repair', el).textContent = isFinite(n) && n > 0 && n < 1 ? `คิดงานซ่อม ${repairQty(n)} ${unit} (น้อยกว่า 1 คิดเป็น 1 ต่อตำแหน่ง)` : '';
+      };
+      const save = () => {
+        const t = inp.value.trim(), n = parseFloat(t.replace(/,/g, ''));
+        if (!t) d.data[f.key] = '';
+        else if (isFinite(n)) d.data[f.key] = fmtQty(n, unit);
+        repairHint(); changed(false);
+      };
+      inp.oninput = () => { inp.value = inp.value.replace(/[^\d.,]/g, ''); delete d.sizeAuto; save(); };
+      $$('[data-u]', el).forEach(b => b.onclick = () => { unit = b.dataset.u; $$('[data-u]', el).forEach(x => x.classList.toggle('on', x === b)); if (inp.value.trim()) { delete d.sizeAuto; save(); } else repairHint(); });
+      repairHint();
     } else if (f.kind === 'text') {
       const dl = f.role === 'title' ? titleSuggestions(d, f) : (f.suggestions || []);
       const lid = 'dl_' + f.key;

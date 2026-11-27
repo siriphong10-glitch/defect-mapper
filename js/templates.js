@@ -100,6 +100,28 @@ export function textOn(hex) {
 }
 
 // Value of a defect field as plain text (used in lists, Excel, JSON)
+// ---------------------------------------------------------------- damage size (number + unit)
+// Stored as plain text "0.45 ตร.ม." / "1.2 ม." so every report keeps working; read back with parseQty.
+export const QTY_UNITS = ['ตร.ม.', 'ม.'];
+// Rule for repair quantities: a spot smaller than 1 unit is counted as 1 per spot; 1 or more is counted as measured (1.2 stays 1.2)
+export const REPAIR_RULE = 'ปริมาณสำหรับคิดงานซ่อม: ความเสียหายที่วัดได้น้อยกว่า 1 ตร.ม. (หรือ 1 ม.) คิดเป็น 1 ต่อตำแหน่ง ส่วนที่มากกว่า 1 คิดตามที่วัดได้';
+export function parseQty(value) {
+  const raw = value == null ? '' : String(value).trim();
+  if (!raw) return { v: null, u: null, raw: '' };
+  const num = (t) => { const n = parseFloat(String(t).replace(/,/g, '')); return isFinite(n) ? n : null; };
+  // older "a x b ม. (area ตร.ม.)" from the plan: take the area
+  const par = raw.match(/\(\s*([\d.,]+)\s*(ตร\.?\s*ม\.?|m2|m²)\s*\)/i);
+  if (par) return { v: num(par[1]), u: 'ตร.ม.', raw };
+  const m = raw.match(/^([\d.,]+)\s*(ตร\.?\s*ม\.?|ตารางเมตร|m2|m²|sq\.?\s*m|ม\.?|เมตร|m)?\s*$/i);
+  if (m) {
+    const u = !m[2] ? null : /ตร|ตาราง|2|²|sq/i.test(m[2]) ? 'ตร.ม.' : 'ม.';
+    return { v: num(m[1]), u, raw };
+  }
+  return { v: null, u: null, raw }; // free text that is not a number + unit
+}
+export const fmtQty = (v, u) => (v == null || v === '' || !isFinite(v) ? '' : `${+(+v).toFixed(2)} ${u || 'ตร.ม.'}`);
+export const repairQty = (v) => (v == null ? null : Math.max(1, +v));
+
 export function fieldText(field, value) {
   if (value == null || value === '') return '';
   if (Array.isArray(value)) {

@@ -4,6 +4,7 @@ import { loadBundle } from './project.js';
 import { presentItems, positionNote, overheadLegend } from './overhead.js';
 import { buildTestModel, testWordSections, testPdfBlocks, addTestSheets } from './test-export.js';
 import { allTypes } from './tests.js';
+import { parseQty, repairQty, REPAIR_RULE } from './templates.js';
 import { TYPE_LABELS, fieldByRole, severityInfo, NO_SEVERITY_COLOR, textOn, fieldText, defectTitle, groupKey } from './templates.js';
 
 const DEFAULT_ORG = 'บริษัท เพอร์ฟอร์มแมกซ์ บิวดิ้ง เซอร์วิซ จำกัด';
@@ -618,6 +619,13 @@ async function exportImages(projectId, opts, prog = () => {}) {
 // =====================================================================================
 // Excel
 // =====================================================================================
+// total repair quantity of a group, per unit: spots under 1 count as 1 (see REPAIR_RULE)
+function repairTotal(items) {
+  const sum = {};
+  for (const it of items) { const q = parseQty(it.size); if (q.v == null) continue; const u = q.u || 'ตร.ม.'; sum[u] = (sum[u] || 0) + repairQty(q.v); }
+  return Object.entries(sum).map(([u, v]) => `${+v.toFixed(2)} ${u}`).join(' + ');
+}
+
 async function exportExcel(projectId, opts, prog = () => {}) {
   prog('กำลังเตรียมข้อมูล', 0.2);
   await loadScript('vendor/xlsx.full.min.js');
@@ -632,6 +640,10 @@ async function exportExcel(projectId, opts, prog = () => {}) {
     const r = { 'ลำดับ': isNaN(+it.no) ? it.no : +it.no, 'ชั้น/แปลน': it.floor.name, 'ตำแหน่ง': it.over ? it.posNote : 'ในพื้นที่ชั้น', 'ประเภทการตรวจ': TYPE_LABELS[it.d.type], 'ลักษณะ': SHAPE_TH[it.d.shape] };
     for (const c of cols) r[c.label] = '';
     for (const f of it.tpl.fields) if (!f.hidden) r[f.label] = fieldText(f, it.d.data?.[f.key]);
+    const q = parseQty(it.size);
+    r['ขนาด (ตัวเลข)'] = q.v ?? '';
+    r['หน่วย'] = q.v != null ? (q.u || 'ตร.ม.') : '';
+    r['ปริมาณคิดงานซ่อม'] = q.v != null ? repairQty(q.v) : '';
     r['พื้นที่จากแปลน (ตร.ม.)'] = it.area != null ? +it.area.toFixed(2) : '';
     r['จำนวนรูป'] = it.d.photoIds?.length || 0;
     if (opts.xlsCoords) {
@@ -646,7 +658,7 @@ async function exportExcel(projectId, opts, prog = () => {}) {
   const header = [[reportTitle(opts) + ' โครงการ ' + p.name], [[p.code, p.client, p.location].filter(Boolean).join(' • ')], []];
   const ws = XLSX.utils.aoa_to_sheet(header);
   XLSX.utils.sheet_add_json(ws, rows, { origin: 'A4' });
-  XLSX.utils.sheet_add_aoa(ws, [[], ['รวมทั้งหมด', rows.length + ' จุด']], { origin: -1 });
+  XLSX.utils.sheet_add_aoa(ws, [[], ['รวมทั้งหมด', rows.length + ' จุด'], ['หมายเหตุ', REPAIR_RULE]], { origin: -1 });
   const keys = Object.keys(rows[0] || { 'ลำดับ': 1 });
   ws['!cols'] = keys.map(k => ({ wch: Math.min(48, Math.max(8, k.length + 2, ...rows.map(r => String(r[k] ?? '').split('\n')[0].length + 1))) }));
   ws['!autofilter'] = { ref: XLSX.utils.encode_range({ s: { r: 3, c: 0 }, e: { r: 3 + rows.length, c: keys.length - 1 } }) };
@@ -657,10 +669,12 @@ async function exportExcel(projectId, opts, prog = () => {}) {
     'ลำดับ': gr.index, 'ประเภทการตรวจ': TYPE_LABELS[gr.type], [gr.first.elementLabel]: gr.element, 'หัวข้อความเสียหาย': gr.title,
     'ระดับสูงสุด': gr.worst.sevText, 'จำนวน': gr.items.length,
     'พื้นที่รวมจากแปลน (ตร.ม.)': gr.items.every(i => i.area != null) ? +gr.items.reduce((s, i) => s + i.area, 0).toFixed(2) : '',
+    'ปริมาณคิดงานซ่อมรวม': repairTotal(gr.items),
     'ตำแหน่งที่พบ': positionsText(gr.items),
   }));
   const ws2 = XLSX.utils.json_to_sheet(g);
-  ws2['!cols'] = [{ wch: 6 }, { wch: 16 }, { wch: 14 }, { wch: 40 }, { wch: 12 }, { wch: 8 }, { wch: 14 }, { wch: 60 }];
+  XLSX.utils.sheet_add_aoa(ws2, [[], ['หมายเหตุ', REPAIR_RULE]], { origin: -1 });
+  ws2['!cols'] = [{ wch: 6 }, { wch: 16 }, { wch: 14 }, { wch: 40 }, { wch: 12 }, { wch: 8 }, { wch: 14 }, { wch: 18 }, { wch: 60 }];
   XLSX.utils.book_append_sheet(wb, ws2, 'สรุปตามหัวข้อ');
 
   const fl = model.perFloor.map(pf => {
@@ -1234,14 +1248,17 @@ export async function exportPack(projectId, prog = () => {}, popts = {}) {
       totals: { points: model.items.length, floors: floors.length, headings: model.groups.length },
       floors: model.perFloor.map((pf, i) => ({ order: i + 1, name: pf.floor.name, count: pf.items.length, scaleMetersPerPixel: pf.floor.scale || null,
         annotatedPlan: `plans/annotated/${String(i + 1).padStart(2, '0')}_${safeName(pf.floor.name)}.png` })),
-      groups: model.groups.map(g => ({ index: g.index, inspectionType: TYPE_LABELS[g.type], element: g.element, title: g.title, worstSeverity: g.worst.sevText, count: g.items.length, points: g.items.map(i => i.no), positions: positionsText(g.items) })),
+      repairQuantityRule: REPAIR_RULE,
+      groups: model.groups.map(g => ({ index: g.index, inspectionType: TYPE_LABELS[g.type], element: g.element, title: g.title, worstSeverity: g.worst.sevText, count: g.items.length, repairQuantityTotal: repairTotal(g.items) || null, points: g.items.map(i => i.no), positions: positionsText(g.items) })),
       defects: model.items.map(it => {
         const fields = {};
         it.tpl.fields.forEach(f => { if (!f.hidden) { const v = fieldText(f, it.d.data?.[f.key]); if (v) fields[f.label] = v; } });
         return {
           no: it.no, floor: it.floor.name, position: it.over ? 'overhead' : 'floor', positionNote: it.posNote || '', foundOnFloor: it.found?.name || it.floor.name, inspectionType: TYPE_LABELS[it.d.type], shape: SHAPE_TH[it.d.shape],
           title: it.title, element: it.element, severity: it.sevText, urgency: it.urgText,
-          areaFromPlan_m2: it.area != null ? +it.area.toFixed(2) : null, fields,
+          areaFromPlan_m2: it.area != null ? +it.area.toFixed(2) : null,
+          ...(() => { const q = parseQty(it.size); return q.v != null ? { size: { value: q.v, unit: q.u || 'ตร.ม.', repairQuantity: repairQty(q.v) } } : {}; })(),
+          fields,
           photos: (it.d.photoIds || []).map(id => blobsMap[id]).filter(Boolean),
         };
       }),
@@ -1288,6 +1305,7 @@ function packReadme(model) {
 3. ระดับความเสียหาย (\`severity\`) และความเร่งด่วน (\`urgency\`) ใช้จัดลำดับความสำคัญของงานซ่อม
 4. ช่อง \`fields\` ของแต่ละจุดเก็บข้อมูลตามแบบฟอร์มจริง (เช่น รายละเอียดความเสียหาย, ผลกระทบต่อความมั่นคง/ความคงทน, รายละเอียดการแก้ไข)
 5. \`areaFromPlan_m2\` คำนวณจากพื้นที่ที่วาดบนแปลนตามสเกลที่ตั้งไว้ (เป็นค่าประมาณ)
+5.1 \`size\` คือขนาดความเสียหายที่ผู้ตรวจบันทึก (\`value\` + \`unit\` เป็น ตร.ม. หรือ ม.) และ \`repairQuantity\` คือปริมาณสำหรับคิดงานซ่อมตาม \`repairQuantityRule\` (ต่ำกว่า 1 คิดเป็น 1 ต่อตำแหน่ง) ; \`groups[].repairQuantityTotal\` คือยอดรวมต่อหัวข้อ
 6. \`tests\` (ถ้ามี) คือผลการทดสอบแยกตามชนิด: \`columns\`/\`rows\` ใช้ทำตารางผลบทที่ 3, \`criteria\` และ \`bands\` คือเกณฑ์ที่ใช้ประเมิน (ปรับได้ในแอพ), คอลัมน์ "หมายเหตุที่ต้องเขียน" บอกรหัสข้อควรระวังตามคลังวิธีทดสอบ (เช่น U1, U4, H1) ; รูปของจุดทดสอบอยู่ใน \`photos/T_<รหัสจุด>_*\`
 
 ## สรุปตามหัวข้อ

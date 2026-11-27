@@ -463,3 +463,7 @@ body:has(.ws-right:not(.closed)) .credit { right: calc(30% + 14px); }
 .ws-left .lhead .lrow select { width: auto; max-width: 46%; padding: 4px 6px; font-size: 12.5px; }
 .lgroup { display: flex; justify-content: space-between; gap: 6px; padding: 8px 8px 3px; margin-top: 4px; font-size: 12.5px; font-weight: 700; color: var(--navy-2, #1f3a5f); border-bottom: 1px solid var(--line-2); position: sticky; top: 0; background: var(--panel); z-index: 1; }
 .lgroup:first-child { margin-top: 0; }
+.qty-row { display: flex; gap: 6px; align-items: stretch; }
+.qty-row .qty-num { flex: 1; min-width: 0; }
+.qty-row .qty-unit { width: auto; flex: 0 0 auto; }
+.qty-row .qty-unit button { padding: 4px 12px; }
